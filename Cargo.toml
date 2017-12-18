@@ -8,8 +8,7 @@ readme        = "README.md"
 repository    = "https://github.com/Centril/proptest-derive"
 documentation = "https://docs.rs/proptest-derive"
 
-keywords      = ["derive", "arbitrary", "property", "testing", "quickcheck",
-                 "hypothesis"]
+keywords      = ["derive", "arbitrary", "proptest", "testing", "quickcheck"]
 categories    = ["development-tools::testing"]
 
 description = """
