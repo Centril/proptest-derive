@@ -16,6 +16,10 @@ description = """
 Custom-derive for the Arbitrary trait of proptest.
 """
 
+[badges]
+
+maintenance = { status = "experimental" }
+
 [lib]
 proc-macro = true
 
