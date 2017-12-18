@@ -1,0 +1,25 @@
+[package]
+name          = "proptest-derive"
+version       = "0.0.1"
+authors       = ["Mazdak Farrokhzad <twingoow@gmail.com>"]
+license       = "MIT/Apache-2.0"
+readme        = "README.md"
+
+repository    = "https://github.com/Centril/proptest-derive"
+documentation = "https://docs.rs/proptest-derive"
+
+keywords      = ["derive", "arbitrary", "property", "testing", "quickcheck",
+                 "hypothesis"]
+categories    = ["development-tools::testing"]
+
+description = """
+Custom-derive for the Arbitrary trait of proptest.
+"""
+
+[lib]
+proc-macro = true
+
+[dependencies]
+
+syn = "0.11.11"
+quote = "0.3.15"
