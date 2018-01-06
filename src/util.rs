@@ -9,13 +9,6 @@ use std::borrow::Borrow;
 // split_for_impl
 //==============================================================================
 
-/// From libcore. TODO: Replace with libcore once stable.
-pub fn from_ref<T>(s: &T) -> &[T] {
-    unsafe {
-        ::std::slice::from_raw_parts(s, 1)
-    }
-}
-
 pub fn split_for_impl<'a>
     (trait_ls: &'a [syn::LifetimeDef], generics: &'a syn::Generics)
     -> (ImplGenerics<'a>, syn::TyGenerics<'a>, &'a syn::WhereClause)
@@ -83,7 +76,7 @@ pub fn variant_data_to_fields(vd: syn::VariantData) -> Vec<syn::Field> {
     match vd {
         Struct(fs) => fs,
         Tuple(fs)  => fs,
-        Unit       => Vec::new()
+        Unit       => vec![]
     }
 }
 
@@ -106,7 +99,7 @@ pub fn parametric_path_segment
 }
 
 pub fn param_lf(lf: syn::Lifetime) -> syn::AngleBracketedParameterData {
-    parameters(vec![lf], Vec::new(), Vec::new())
+    parameters(vec![lf], vec![], vec![])
 }
 
 pub fn parameters
@@ -151,11 +144,8 @@ pub fn is_phantom_data(qp: &Option<syn::QSelf>, path: &syn::Path) -> bool {
 pub fn extract_simple_path<'a>(qp: &Option<syn::QSelf>, path: &'a syn::Path)
     -> Option<&'a syn::Ident>
 {
-    let mut iter = path.segments.iter();
-    match (iter.next(), iter.next()) {
-        (Some(f), None) if qp.is_none() && !path.global => Some(&f.ident),
-        _ => None,
-    }
+    match_singleton(&path.segments).and_then(|f|
+        if qp.is_none() && !path.global { Some(&f.ident) } else { None })
 }
 
 pub fn pp_has_single_tyvar(pp: &syn::PathParameters) -> bool {
@@ -180,5 +170,22 @@ pub fn is_unit_type<T: Borrow<syn::Ty>>(ty: T) -> bool {
         vec.is_empty()
     } else {
         false
+    }
+}
+
+//==============================================================================
+// General Rust utilities:
+//==============================================================================
+
+/// Returns `Some(x)` iff the slice is singleton and otherwise None.
+pub fn match_singleton<T>(slice: &[T]) -> Option<&T> {
+    let mut it = slice.into_iter();
+    if let (Some(x), None) = (it.next(), it.next()) { Some(x) } else { None }
+}
+
+/// From libcore. TODO: Replace with libcore once stable.
+pub fn from_ref<T>(s: &T) -> &[T] {
+    unsafe {
+        ::std::slice::from_raw_parts(s, 1)
     }
 }
