@@ -1,5 +1,6 @@
 use syn;
 use util;
+use error;
 
 use std::iter;
 use std::vec;
@@ -10,10 +11,17 @@ use std::vec;
 
 #[derive(Clone, Debug)]
 pub struct ParsedAttributes {
-    pub skip:     PSkip,
+    pub skip:     bool,
     pub weight:   PWeight,
     pub params:   ParamsMode,
-    pub strategy: PStrategy,
+    pub strategy: StratMode,
+}
+
+#[derive(Clone, Debug)]
+pub enum StratMode {
+    Arbitrary,
+    Value(syn::Expr),
+    Strategy(syn::Expr),
 }
 
 #[derive(Clone, Debug)]
@@ -25,24 +33,37 @@ pub enum ParamsMode {
 
 impl ParamsMode {
     pub fn is_set(&self) -> bool {
-        match *self {
-            ParamsMode::Passthrough => false,
-            _ => true,
+        if let ParamsMode::Passthrough = *self { false } else { true }
+    }
+
+    pub fn to_option(self) -> Option<Option<syn::Ty>> {
+        use self::ParamsMode::*;
+        match self {
+            Passthrough => None,
+            Specified(ty) => Some(Some(ty)),
+            Default => Some(None),
         }
     }
 }
 
+impl StratMode {
+    pub fn is_set(&self) -> bool {
+        if let StratMode::Arbitrary = *self { false } else { true }
+    }
+}
+
 pub fn parse_attributes(attrs: Vec<syn::Attribute>) -> ParsedAttributes {
-    let (skip, weight, no_params, ty_params, strategy)
+    let (skip, weight, no_params, ty_params, strategy, value)
       = attrs.into_iter()
              .filter(is_proptest_attr)
              .flat_map(extract_modifiers)
              .fold(init_parse_state(), dispatch_attribute);
 
-    let params
-      = parse_params_mode(no_params, ty_params);
+    let params = parse_params_mode(no_params, ty_params);
+    let strategy = parse_strat_mode(strategy, value);
+    let skip = skip.is_some();
 
-    ParsedAttributes { skip, weight, params, strategy, }
+    ParsedAttributes { skip, weight, params, strategy }
 }
 
 //==============================================================================
@@ -54,9 +75,11 @@ type PWeight   = Option<u32>;
 type PNoParams = Option<()>;
 type PTyParams = Option<syn::Ty>;
 type PStrategy = Option<syn::Expr>;
-type PAll      = (PSkip, PWeight, PNoParams, PTyParams, PStrategy);
+type PAll      = (PSkip, PWeight,
+                  PNoParams, PTyParams,
+                  PStrategy, PStrategy);
 
-fn init_parse_state() -> PAll { (None, None, None, None, None) }
+fn init_parse_state() -> PAll { (None, None, None, None, None, None) }
 
 //==============================================================================
 // Internals: Extraction & Filtering
@@ -74,7 +97,8 @@ fn extract_modifiers(attr: syn::Attribute)
     use syn::MetaItem::{Word, NameValue, List};
     use syn::NestedMetaItem::{MetaItem, Literal};
 
-    if !util::is_outer_attr(&attr) { error::outer_attr(); }
+    error_if_inner_attr(&attr);
+
     match attr.value {
         Word(_)          => error::bare_proptest_attr(),
         NameValue(_, _)  => error::literal_set_proptest(),
@@ -85,6 +109,10 @@ fn extract_modifiers(attr: syn::Attribute)
     }
 }
 
+fn error_if_inner_attr(attr: &syn::Attribute) {
+    if !util::is_outer_attr(&attr) { error::outer_attr(); }
+}
+
 //==============================================================================
 // Internals: Dispatch
 //==============================================================================
@@ -93,46 +121,60 @@ fn dispatch_attribute(mut acc: PAll, meta: syn::MetaItem) -> PAll {
     // TODO: revisit when we have NLL.
 
     // Dispatch table for attributes:
-    match meta.name() {
-        "skip"          => parse_skip(&mut acc.0, &meta),
-        "w"             => parse_weight(&mut acc.1, &meta),
-        "weight"        => parse_weight(&mut acc.1, &meta),
-        "no_params"     => parse_no_params(&mut acc.2, &meta),
-        "params"        => parse_params(&mut acc.3, &meta),
-        "strategy"      => parse_strategy(&mut acc.4, &meta),
-        "weights"       => error::did_you_mean("weight",    "weights"),
-        "strat"         => error::did_you_mean("strategy",  "strat"),
-        "strategies"    => error::did_you_mean("strategy",  "strategies"),
-        "param"         => error::did_you_mean("params",    "param"),
-        "parameters"    => error::did_you_mean("params",    "parameters"),
-        "no_param"      => error::did_you_mean("no_params", "no_param"),
-        "no_parameters" => error::did_you_mean("no_params", "no_parameters"),
-        modifier        => error::unkown_modifier(modifier),
-    }
+    let parser = {
+        let name = meta.name();
+        match name {
+            "skip"          => parse_skip,
+            "w" | "weight"  => parse_weight,
+            "no_params"     => parse_no_params,
+            "params"        => parse_params,
+            "strategy"      => parse_strategy,
+            "value"         => parse_value,
+            "weights" |
+            "weighted"      => error::did_you_mean(name, "weight"),
+            "strat" |
+            "strategies"    => error::did_you_mean(name, "strategy"),
+            "values" |
+            "valued" |
+            "fix" |
+            "fixed"         => error::did_you_mean(name, "value"),
+            "param" |
+            "parameters"    => error::did_you_mean(name, "params"),
+            "no_param" |
+            "no_parameters" => error::did_you_mean(name, "no_params"),
+            modifier        => error::unkown_modifier(modifier),
+        }
+    };
+    parser(&mut acc, meta);
+
     acc
 }
 
-fn parse_skip(set: &mut PSkip, meta: &syn::MetaItem) {
-    if set.is_some() { error::set_again("skip"); }
-    else if let &syn::MetaItem::Word(_) = meta { *set = Some(()); }
+//==============================================================================
+// Internals: Skip
+//==============================================================================
+
+fn parse_skip(set: &mut PAll, meta: syn::MetaItem) {
+    error_if_set(&set.0, "skip");
+    if let syn::MetaItem::Word(_) = meta { set.0 = Some(()); }
     else { error::skip_malformed(); }
 }
 
-fn parse_weight(set: &mut PWeight, meta: &syn::MetaItem) {
+//==============================================================================
+// Internals: Weight
+//==============================================================================
+
+fn parse_weight(set: &mut PAll, meta: syn::MetaItem) {
     use std::u32;
-    use syn::IntTy::{I8, I32, I16, I64};
     use syn::Lit;
 
     let name = meta.name();
 
-    if set.is_some() {
-        error::set_again(name);
-    } else if let &syn::MetaItem::NameValue(_, Lit::Int(val, ty)) = meta {
-        if val <= u32::MAX as u64 && match ty {
-            I8 | I16 | I32 | I64 => false,
-            _ => true
-        } {
-            *set = Some(val as u32);  
+    error_if_set(&set.1, name);
+
+    if let syn::MetaItem::NameValue(_, Lit::Int(val, ty)) = meta {
+        if val <= u32::MAX as u64 && is_int_ty_unsigned(ty) {
+            set.1 = Some(val as u32);  
         } else {
             error::weight_malformed(name);
         }
@@ -141,21 +183,51 @@ fn parse_weight(set: &mut PWeight, meta: &syn::MetaItem) {
     }
 }
 
-fn parse_strategy(set: &mut PStrategy, meta: &syn::MetaItem) {
+fn is_int_ty_unsigned(ty: syn::IntTy) -> bool {
+    use syn::IntTy::{I8, I32, I16, I64};
+    match ty {
+        I8 | I16 | I32 | I64 => false,
+        _ => true
+    }
+}
+
+//==============================================================================
+// Internals: Strategy
+//==============================================================================
+
+fn parse_value(set: &mut PAll, meta: syn::MetaItem) {
+    parse_strategy_base(&mut set.5, meta);
+}
+
+fn parse_strategy(set: &mut PAll, meta: syn::MetaItem) {
+    parse_strategy_base(&mut set.4, meta);
+}
+
+fn parse_strategy_base(set: &mut PStrategy, meta: syn::MetaItem) {
     use syn::MetaItem::NameValue;
     use syn::Lit;
     use syn::StrStyle::Cooked;
 
-    if set.is_some() {
-        error::set_again("strategy");
-    } else if let &NameValue(_, Lit::Str(ref lit, Cooked)) = meta {
+    let name = meta.name();
+    error_if_set(&set, name);
+
+    if let NameValue(_, Lit::Str(ref lit, Cooked)) = meta {
         if let Ok(expr) = syn::parse_expr(lit.as_ref()) {
             *set = Some(expr);
         } else {
-            error::strategy_malformed_expr();
+            error::strategy_malformed_expr(name);
         }
     } else {
-        error::strategy_malformed();
+        error::strategy_malformed(name);
+    }
+}
+
+fn parse_strat_mode(strat: PStrategy, value: PStrategy) -> StratMode {
+    match (strat, value) {
+        (None,     None    ) => StratMode::Arbitrary,
+        (None,     Some(ty)) => StratMode::Value(ty),
+        (Some(ty), None    ) => StratMode::Strategy(ty),
+        (Some(_), Some(_) )  => error::overspecified_strat(),
     }
 }
 
@@ -165,33 +237,35 @@ fn parse_strategy(set: &mut PStrategy, meta: &syn::MetaItem) {
 
 fn parse_params_mode(no_params: PNoParams, ty_params: PTyParams) -> ParamsMode {
     match (no_params, ty_params) {
-        (Some(_), Some(_) ) => error::overspecified_param(),
         (None,    None    ) => ParamsMode::Passthrough,
-        (Some(_), None    ) => ParamsMode::Default,
         (None,    Some(ty)) => ParamsMode::Specified(ty),
+        (Some(_), None    ) => ParamsMode::Default,
+        (Some(_), Some(_) ) => error::overspecified_param(),
     }
 }
 
-fn parse_params(set: &mut PTyParams, meta: &syn::MetaItem) {
+fn parse_params(set: &mut PAll, meta: syn::MetaItem) {
     use syn::MetaItem::{NameValue, Word, List};
     use syn::NestedMetaItem::MetaItem;
     use syn::Lit;
     use syn::StrStyle::Cooked;
 
-    if set.is_some() {
-        error::set_again("params");
-    } else if let &NameValue(_, Lit::Str(ref lit, Cooked)) = meta {
+    let set = &mut set.3;
+
+    error_if_set(&set, "params");
+
+    if let NameValue(_, Lit::Str(lit, Cooked)) = meta {
         if let Ok(ty) = syn::parse_type(lit.as_ref()) {
             *set = Some(ty);
         } else {
             error::param_malformed_type();
         }
-    } else if let &List(_, ref list) = meta {
-        let mut iter = list.iter().filter_map(|nmi|
-            if let MetaItem(Word(ref i)) = *nmi { Some(i) } else { None });
+    } else if let List(_, list) = meta {
+        let mut iter = list.into_iter().filter_map(|nmi|
+            if let MetaItem(Word(i)) = nmi { Some(i) } else { None });
 
         if let (Some(ident), None) = (iter.next(), iter.next()) {
-            *set = Some(syn::Ty::Path(None, ident.clone().into()));
+            *set = Some(syn::Ty::Path(None, ident.into()));
         } else {
             error::param_malformed();
         }
@@ -200,116 +274,16 @@ fn parse_params(set: &mut PTyParams, meta: &syn::MetaItem) {
     }
 }
 
-fn parse_no_params(set: &mut PNoParams, meta: &syn::MetaItem) {
-    if set.is_some() { error::set_again("no_params"); }
-    else if let &syn::MetaItem::Word(_) = meta { *set = Some(()); }
+fn parse_no_params(set: &mut PAll, meta: syn::MetaItem) {
+    error_if_set(&set.2, "no_params");
+    if let syn::MetaItem::Word(_) = meta { set.2 = Some(()); }
     else { error::no_params_malformed(); }
 }
 
 //==============================================================================
-// Internals: Errors
+// Internals: Utilities
 //==============================================================================
 
-mod error {
-    pub fn overspecified_param() -> ! {
-        panic!("Can not set #[proptest(no_params)] and \
-                #[proptest(params(<type>))] simultaneously in \
-                #[derive(Arbitrary)] from proptest_derive. \
-                Please pick one of those attributes.");
-    }
-
-    pub fn outer_attr() {
-        panic!("Outer attributes #![proptest(..)] are not currently \
-                supported by #[derive(Arbitrary)] from proptest_derive.");
-    }
-
-    pub fn bare_proptest_attr() -> ! {
-        panic!("Bare #[proptest] attribute in #[derive(Arbitrary)] \
-                from proptest_derive is not allowed.");
-    }
-
-    pub fn literal_set_proptest() -> ! {
-        panic!("The attribute form #[proptest = <literal>] in \
-                #[derive(Arbitrary)] from proptest_derive is not allowed.");
-    }
-
-    pub fn immediate_literals() -> ! {
-        panic!("Literals immediately inside #[proptest(..)] as in \
-                #[proptest(<lit>, ..)] in #[derive(Arbitrary)] from \
-                proptest_derive are not allowed.");
-    }
-
-    pub fn set_again(modifier: &str) -> ! {
-        panic!("The attribute modifier \"{}\" inside #[proptest(..)] in \
-                #[derive(Arbitrary)] from proptest_derive has already been \
-                set. To fix the error, please remove at least one such \
-                modifier."
-              , modifier);
-    }
-
-    pub fn did_you_mean(expected: &str, found: &str) -> ! {
-        panic!("Unknown attribute modifier {} inside #[proptest(..)] in \
-                #[derive(Arbitrary)] from proptest_derive is not allowed. \
-                Did you mean to write {} instead?"
-            , found
-            , expected);
-    }
-
-    pub fn unkown_modifier(modifier: &str) -> ! {
-        panic!("Unknown attribute modifier {} inside #[proptest(..)] in \
-                #[derive(Arbitrary)] from proptest_derive is not allowed."
-            , modifier);
-    }
-
-    pub fn no_params_malformed() -> ! {
-        panic!("The attribute modifier \"no_params\" inside #[proptest(..)] \
-                in #[derive(Arbitrary)] from proptest_derive does not support \
-                any further configuration and must be a plain modifier as in \
-                #[proptest(no_params)].");
-    }
-
-    pub fn skip_malformed() -> ! {
-        panic!("The attribute modifier \"skip\" inside #[proptest(..)] in \
-                #[derive(Arbitrary)] from proptest_derive does not support \
-                any further configuration and must be a plain modifier as in \
-                #[proptest(skip)].");
-    }
-
-    pub fn weight_malformed(attr_name: &str) -> ! {
-        panic!("The attribute modifier {0:?} inside #[proptest(..)] in \
-                #[derive(Arbitrary)] from proptest_derive must have the \
-                format #[proptest({0} = <integer>)] where <integer> is an \
-                integer that fits within a u32. \
-                An example: #[proptest({0} = 2)] to set a \
-                relative weight of 2."
-              , attr_name);
-    }
-
-    pub fn param_malformed() -> ! {
-        panic!("The attribute modifier \"params\" inside #[proptest(..)] in \
-                #[derive(Arbitrary)] from proptest_derive must have the \
-                format #[proptest(params = \"<type>\")] where <type> is a \
-                valid type in Rust. \
-                An example: #[proptest(params = ComplexType<Foo>)].");
-    }
-
-    pub fn param_malformed_type() -> ! {
-        panic!("The attribute modifier \"params\" inside #[proptest(..)] in \
-                #[derive(Arbitrary)] from proptest_derive is not assigned a \
-                valid Rust type. A valid example: \
-                #[proptest(params = ComplexType<Foo>)].");
-    }
-
-    pub fn strategy_malformed() -> ! {
-        panic!("The attribute modifier \"strategy\" inside #[proptest(..)] \
-                in #[derive(Arbitrary)] from proptest_derive must have the \
-                format #[proptest(strategy = \"<expr>\")] where <expr> is a \
-                valid Rust expression.");
-    }
-
-    pub fn strategy_malformed_expr() -> ! {
-        panic!("The attribute modifier \"param\" inside #[proptest(..)] \
-                in #[derive(Arbitrary)] from proptest_derive is not assigned \
-                a valid Rust expression.");
-    }
+fn error_if_set<T>(set: &Option<T>, attr: &str) {
+    if set.is_some() { error::set_again(attr); }
 }

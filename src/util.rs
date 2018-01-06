@@ -1,32 +1,9 @@
 use syn;
-use quote;
+use quote::{Tokens, ToTokens};
 
-//==============================================================================
-// FreshVar
-//==============================================================================
+use use_tracking;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FreshVar<'a> {
-    prefix: &'a str,
-    count: usize
-}
-
-pub fn fresh_var(prefix: &str, count: usize) -> FreshVar {
-    FreshVar { prefix, count }
-}
-
-impl<'a> From<FreshVar<'a>> for syn::Ident {
-    fn from(fv: FreshVar<'a>) -> Self {
-        // TODO: Suboptimal.. optimize later.
-        format!("{}_{}", fv.prefix, fv.count).into()
-    }
-}
-
-impl<'a> quote::ToTokens for FreshVar<'a> {
-    fn to_tokens(&self, tokens: &mut quote::Tokens) {
-        syn::Ident::from(*self).to_tokens(tokens)
-    }
-}
+use std::borrow::Borrow;
 
 //==============================================================================
 // split_for_impl
@@ -56,8 +33,8 @@ pub struct ImplGenerics<'a> {
     generics: &'a syn::Generics,
 }
 
-impl<'a> quote::ToTokens for ImplGenerics<'a> {
-    fn to_tokens(&self, tokens: &mut quote::Tokens) {
+impl<'a> ToTokens for ImplGenerics<'a> {
+    fn to_tokens(&self, tokens: &mut Tokens) {
         let t_lifetimes = self.trait_ls;
         let g_lifetimes = &self.generics.lifetimes;
         let g_ty_params = &self.generics.ty_params;
@@ -94,23 +71,19 @@ impl<'a> quote::ToTokens for ImplGenerics<'a> {
 // General AST manipulation and types
 //==============================================================================
 
-pub enum StructStyle { Unit, Named, Tuple, }
-
 pub struct DeriveInput<B> {
     pub ident: syn::Ident,
     pub attrs: Vec<syn::Attribute>,
-    pub generics: syn::Generics,
+    pub tracker: use_tracking::UseTracker,
     pub body: B
 }
 
-pub fn variant_data_to_fields(vd: syn::VariantData)
-    -> (StructStyle, Vec<syn::Field>)
-{
+pub fn variant_data_to_fields(vd: syn::VariantData) -> Vec<syn::Field> {
     use syn::VariantData::*;
     match vd {
-        Struct(fs) => (StructStyle::Named, fs),
-        Tuple(fs)  => (StructStyle::Tuple, fs),
-        Unit       => (StructStyle::Unit , Vec::new())
+        Struct(fs) => fs,
+        Tuple(fs)  => fs,
+        Unit       => Vec::new()
     }
 }
 
@@ -118,6 +91,94 @@ pub fn is_outer_attr(attr: &syn::Attribute) -> bool {
     attr.style == syn::AttrStyle::Outer
 }
 
-pub fn plain_lifetime_def(lifetime: syn::Lifetime) -> syn::LifetimeDef {
-    syn::LifetimeDef { attrs: Vec::new(), bounds: Vec::new(), lifetime }
+pub fn idents_to_path(idents: &[&str]) -> Vec<syn::PathSegment> {
+    idents.iter().map(|&id| id.into()).collect()
+}
+
+pub fn parametric_path_segment
+    (ident: &str, param_data: syn::AngleBracketedParameterData)
+    -> syn::PathSegment
+{
+    syn::PathSegment {
+        ident: ident.into(),
+        parameters: syn::PathParameters::AngleBracketed(param_data)
+    }
+}
+
+pub fn param_lf(lf: syn::Lifetime) -> syn::AngleBracketedParameterData {
+    parameters(vec![lf], Vec::new(), Vec::new())
+}
+
+pub fn parameters
+    ( lifetimes: Vec<syn::Lifetime>
+    , types: Vec<syn::Ty>
+    , bindings: Vec<syn::TypeBinding>)
+    -> syn::AngleBracketedParameterData {
+    syn::AngleBracketedParameterData { lifetimes, types, bindings }
+}
+
+pub fn global_path(segments: Vec<syn::PathSegment>) -> syn::Path {
+    syn::Path { global: true, segments }
+}
+
+pub fn match_pathsegs(segs: &[syn::PathSegment], against: &[&[&str]]) -> bool {
+    against.iter().any(|kups|
+        kups.len() == segs.len() &&
+        segs.iter().zip(kups.iter())
+            .all(|(x, y)| x.parameters.is_empty() && x.ident == y)
+    )
+}
+
+pub fn is_phantom_data(qp: &Option<syn::QSelf>, path: &syn::Path) -> bool {
+    let segs = &path.segments;
+    if qp.is_some() || segs.is_empty() { return false }
+    let last = segs.len() - 1;
+    let lseg = &segs[last];
+
+    &lseg.ident == "PhantomData" &&
+    pp_has_single_tyvar(&lseg.parameters) &&
+    match_pathsegs(&segs[..last], &[
+        // We hedge a bet that user will never declare
+        // their own type named PhantomData.
+        // This may give errors, but is worth it usability-wise.
+        &[],
+        &["marker"],
+        &["std", "marker"],
+        &["core", "marker"]
+    ])
+}
+
+pub fn extract_simple_path<'a>(qp: &Option<syn::QSelf>, path: &'a syn::Path)
+    -> Option<&'a syn::Ident>
+{
+    let mut iter = path.segments.iter();
+    match (iter.next(), iter.next()) {
+        (Some(f), None) if qp.is_none() && !path.global => Some(&f.ident),
+        _ => None,
+    }
+}
+
+pub fn pp_has_single_tyvar(pp: &syn::PathParameters) -> bool {
+    if let syn::PathParameters::AngleBracketed(ref x) = *pp {
+        x.lifetimes.is_empty() && x.bindings.is_empty() && x.types.len() == 1
+    } else {
+        false
+    }
+}
+
+pub fn make_path_bound(path: syn::Path) -> syn::TyParamBound {
+    let ptr = syn::PolyTraitRef { trait_ref: path, bound_lifetimes: vec![] };
+    syn::TyParamBound::Trait(ptr, syn::TraitBoundModifier::None)
+}
+
+pub fn self_ty() -> syn::Ty {
+    syn::Ty::Path(None, "Self".into())
+}
+
+pub fn is_unit_type<T: Borrow<syn::Ty>>(ty: T) -> bool {
+    if let &syn::Ty::Tup(ref vec) = ty.borrow() {
+        vec.is_empty()
+    } else {
+        false
+    }
 }

@@ -1,6 +1,7 @@
 use syn;
+use util;
 
-pub (crate) trait IsUninhabited {
+pub trait IsUninhabited {
     /// Returns true if the given type is known to be uninhabited.
     /// There may be more scenarios under which the type is uninhabited.
     /// Thus, this is not a complete and exhaustive check.
@@ -54,11 +55,7 @@ impl IsUninhabited for syn::Ty {
         use syn::Ty::*;
         match *self {
             Never => true,
-            Path(None, ref p) => if match_uninhabited_pathsegs(&p.segments) {
-                true
-            } else {
-                false
-            },
+            Path(None, ref p) => match_uninhabited_pathsegs(&p.segments),
             Path(_, _) => {
                 // TODO
                 false
@@ -83,15 +80,11 @@ impl IsUninhabited for syn::Ty {
     }
 }
 
-const KNOWN_UNINHABITED_PATH_SEGMENTS : &[&[&str]] = &[
-    &["std", "convert", "Infallible"],
-    &["core", "convert", "Infallible"]
-];
-
 fn match_uninhabited_pathsegs(segs: &[syn::PathSegment]) -> bool {
-    KNOWN_UNINHABITED_PATH_SEGMENTS.iter().any(|kups|
-        kups.len() == segs.len() &&
-        segs.iter().map(|seg| &seg.ident).zip(kups.iter())
-            .all(|(x, y)| x == y)
-    )
+    util::match_pathsegs(segs, &[
+        &["Infallible"],
+        &["convert", "Infallible"],
+        &["std", "convert", "Infallible"],
+        &["core", "convert", "Infallible"]
+    ])
 }
