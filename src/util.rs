@@ -1,3 +1,5 @@
+//! Mostly useful utilities for syn used in the crate.
+
 use syn;
 use quote::{Tokens, ToTokens};
 
@@ -9,6 +11,9 @@ use std::borrow::Borrow;
 // split_for_impl
 //==============================================================================
 
+/// This is a bit unfortunate that we have to duplicate this effort...
+/// However, syn provides no method at the moment for playing tyvars and
+/// lifetime variables on the trait, so we have to do this.
 pub fn split_for_impl<'a>
     (trait_ls: &'a [syn::LifetimeDef], generics: &'a syn::Generics)
     -> (ImplGenerics<'a>, syn::TyGenerics<'a>, &'a syn::WhereClause)
@@ -28,6 +33,8 @@ pub struct ImplGenerics<'a> {
 
 impl<'a> ToTokens for ImplGenerics<'a> {
     fn to_tokens(&self, tokens: &mut Tokens) {
+        // Logic derived almost entirely from the syn crate.
+        // Therefore some bits of this is owned (copyrighted) by David Tolnay.
         let t_lifetimes = self.trait_ls;
         let g_lifetimes = &self.generics.lifetimes;
         let g_ty_params = &self.generics.ty_params;
@@ -64,6 +71,8 @@ impl<'a> ToTokens for ImplGenerics<'a> {
 // General AST manipulation and types
 //==============================================================================
 
+/// Simplified version of `DeriveInput` from syn letting us be generic over
+/// the body.
 pub struct DeriveInput<B> {
     pub ident: syn::Ident,
     pub attrs: Vec<syn::Attribute>,
@@ -71,6 +80,9 @@ pub struct DeriveInput<B> {
     pub body: B
 }
 
+/// Extract the list of fields from a `VariantData` from syn.
+/// We don't care about the style, we always and uniformly use {} in
+/// struct literal syntax for making struct and enum variant values.
 pub fn variant_data_to_fields(vd: syn::VariantData) -> Vec<syn::Field> {
     use syn::VariantData::*;
     match vd {
@@ -80,14 +92,21 @@ pub fn variant_data_to_fields(vd: syn::VariantData) -> Vec<syn::Field> {
     }
 }
 
+/// Returns true iff the given attribute is an outer one, i.e: `#[<attr>]`.
+/// An inner attribute is the other possibility and has the syntax `#![<attr>]`.
+/// Note that `<attr>` is a meta-variable for the contents inside.
 pub fn is_outer_attr(attr: &syn::Attribute) -> bool {
     attr.style == syn::AttrStyle::Outer
 }
 
+/// Constructs a list of `syn::PathSegment` given a list of
+/// identifiers as string slices. Useful for quickly making
+/// a `syn::Path` out of a specific known path.
 pub fn idents_to_path(idents: &[&str]) -> Vec<syn::PathSegment> {
     idents.iter().map(|&id| id.into()).collect()
 }
 
+/// Helper for constructing a path segment with possible parameters.
 pub fn parametric_path_segment
     (ident: &str, param_data: syn::AngleBracketedParameterData)
     -> syn::PathSegment
@@ -98,10 +117,13 @@ pub fn parametric_path_segment
     }
 }
 
+/// Constructs parameter data for the given lifetime.
+/// This is useful for specifying the `<'a>` in `Arbitrary<'a>`.
 pub fn param_lf(lf: syn::Lifetime) -> syn::AngleBracketedParameterData {
     parameters(vec![lf], vec![], vec![])
 }
 
+/// A shorthand for struct literal syntax for `syn::AngleBracketedParameterData`.
 pub fn parameters
     ( lifetimes: Vec<syn::Lifetime>
     , types: Vec<syn::Ty>
@@ -110,10 +132,13 @@ pub fn parameters
     syn::AngleBracketedParameterData { lifetimes, types, bindings }
 }
 
+/// Returns a global (prefixed by `::`) path from the given path segments.
 pub fn global_path(segments: Vec<syn::PathSegment>) -> syn::Path {
     syn::Path { global: true, segments }
 }
 
+/// Returns true iff the given path segments matches any of given
+/// path segments specified as string slices.
 pub fn match_pathsegs(segs: &[syn::PathSegment], against: &[&[&str]]) -> bool {
     against.iter().any(|kups|
         kups.len() == segs.len() &&
@@ -122,6 +147,8 @@ pub fn match_pathsegs(segs: &[syn::PathSegment], against: &[&[&str]]) -> bool {
     )
 }
 
+/// Returns true iff the given type is of the form `PhantomData<TY>` where
+/// `TY` can be substituted for any type, including type variables.
 pub fn is_phantom_data(qp: &Option<syn::QSelf>, path: &syn::Path) -> bool {
     let segs = &path.segments;
     if qp.is_some() || segs.is_empty() { return false }
@@ -141,6 +168,7 @@ pub fn is_phantom_data(qp: &Option<syn::QSelf>, path: &syn::Path) -> bool {
     ])
 }
 
+/// Extracts a simple non-global path of length 1.
 pub fn extract_simple_path<'a>(qp: &Option<syn::QSelf>, path: &'a syn::Path)
     -> Option<&'a syn::Ident>
 {
@@ -148,6 +176,8 @@ pub fn extract_simple_path<'a>(qp: &Option<syn::QSelf>, path: &'a syn::Path)
         if qp.is_none() && !path.global { Some(&f.ident) } else { None })
 }
 
+/// Returns true iff the given `PathParameters` is one that has one type
+/// applied to it.
 pub fn pp_has_single_tyvar(pp: &syn::PathParameters) -> bool {
     if let syn::PathParameters::AngleBracketed(ref x) = *pp {
         x.lifetimes.is_empty() && x.bindings.is_empty() && x.types.len() == 1
@@ -156,15 +186,20 @@ pub fn pp_has_single_tyvar(pp: &syn::PathParameters) -> bool {
     }
 }
 
+/// Constructs a bound like `::std::fmt::Debug` that can be used as:
+/// `T: ::std::fmt::Debug`.
 pub fn make_path_bound(path: syn::Path) -> syn::TyParamBound {
     let ptr = syn::PolyTraitRef { trait_ref: path, bound_lifetimes: vec![] };
     syn::TyParamBound::Trait(ptr, syn::TraitBoundModifier::None)
 }
 
+/// Returns the `Self` type (in the literal syntactic sense).
 pub fn self_ty() -> syn::Ty {
     syn::Ty::Path(None, "Self".into())
 }
 
+/// Returns true iff the given type is the literal unit type `()`.
+/// This is treated the same way by `syn` as a 0-tuple.
 pub fn is_unit_type<T: Borrow<syn::Ty>>(ty: T) -> bool {
     if let &syn::Ty::Tup(ref vec) = ty.borrow() {
         vec.is_empty()
