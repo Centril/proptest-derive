@@ -202,6 +202,14 @@ impl Params {
     pub fn empty() -> Self {
         Params::Many(Vec::new())
     }
+
+    /// Computes and returns the number of parameter types.
+    pub fn len(&self) -> usize {
+        match *self {
+            Params::Single(_) => 1,
+            Params::Many(ref tys) => tys.len()
+        }
+    }
 }
 
 impl From<Params> for syn::Ty {
@@ -217,12 +225,14 @@ impl Add<syn::Ty> for Params {
     type Output = Params;
 
     fn add(self, rhs: syn::Ty) -> Self::Output {
+        /*
         if is_unit_type(&rhs) {
             // We've been given a unit type - for ergonomics,
             // we skip the type so as to not force the user to
             // specify a tuple of units just to please the compiler.
             self
         } else {
+        */
             // Logic is straight forward here.. We just add one type.
             match self {
                 Params::Single(typ) => Params::Many(vec![typ, rhs]),
@@ -233,7 +243,7 @@ impl Add<syn::Ty> for Params {
                     Params::Many(types)
                 }
             }
-        }
+        //}
     }
 }
 
