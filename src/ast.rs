@@ -1,3 +1,11 @@
+// Copyright 2018 Mazdak Farrokhzad
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
 //! High level IR and abstract syntax tree (AST) of impls.
 //!
 //! We compile to this AST and then linearise that to Rust code.
