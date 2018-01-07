@@ -149,9 +149,9 @@ pub fn match_pathsegs(segs: &[syn::PathSegment], against: &[&[&str]]) -> bool {
 
 /// Returns true iff the given type is of the form `PhantomData<TY>` where
 /// `TY` can be substituted for any type, including type variables.
-pub fn is_phantom_data(qp: &Option<syn::QSelf>, path: &syn::Path) -> bool {
+pub fn is_phantom_data(path: &syn::Path) -> bool {
     let segs = &path.segments;
-    if qp.is_some() || segs.is_empty() { return false }
+    if segs.is_empty() { return false }
     let last = segs.len() - 1;
     let lseg = &segs[last];
 
@@ -169,11 +169,9 @@ pub fn is_phantom_data(qp: &Option<syn::QSelf>, path: &syn::Path) -> bool {
 }
 
 /// Extracts a simple non-global path of length 1.
-pub fn extract_simple_path<'a>(qp: &Option<syn::QSelf>, path: &'a syn::Path)
-    -> Option<&'a syn::Ident>
-{
+pub fn extract_simple_path<'a>(path: &'a syn::Path) -> Option<&'a syn::Ident> {
     match_singleton(&path.segments).and_then(|f|
-        if qp.is_none() && !path.global { Some(&f.ident) } else { None })
+        if !path.global { Some(&f.ident) } else { None })
 }
 
 /// Returns true iff the given `PathParameters` is one that has one type

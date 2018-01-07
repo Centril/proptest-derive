@@ -22,15 +22,12 @@ maintenance = { status = "experimental" }
 [lib]
 proc-macro = true
 
-[features]
-
-default = ["syn/full"]
-
 [dev-dependencies]
 proptest = "0.3.2"
 proptest-arbitrary = { path = "../proptest-arbitrary" }
 
 [dependencies]
 
-syn = "0.11.11"
+syn = { version = "0.11", features = ["full", "visit"] }
+
 quote = "0.3.15"
