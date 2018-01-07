@@ -1,6 +1,12 @@
+//! Provides the `IsUninhabited` trait. See the trait for more information.
+
 use syn;
 use util;
 
+/// A trait for types for which it is possible to check if the modelled
+/// object is uninhabited or not. A `false` answer means that we can not
+/// tell for sure that the thing is uninhabited, not that we are 100%
+/// certain that it is inhabited.
 pub trait IsUninhabited {
     /// Returns true if the given type is known to be uninhabited.
     /// There may be more scenarios under which the type is uninhabited.
@@ -56,10 +62,10 @@ impl IsUninhabited for syn::Ty {
         match *self {
             Never => true,
             Path(None, ref p) => match_uninhabited_pathsegs(&p.segments),
-            Path(_, _) => {
-                // TODO
-                false
-            },
+            // Even if `T` in `<T as Trait>::Item` is uninhabited, the
+            // associated item may be inhabited, so we can't say for sure
+            // that it is uninhabited.
+            Path(_, _) => false,
             Paren(ref box_ty)    => box_ty.is_uninhabited(),
             Slice(ref box_ty)    => box_ty.is_uninhabited(),
             Array(ref box_ty, _) => box_ty.is_uninhabited(),
@@ -80,6 +86,8 @@ impl IsUninhabited for syn::Ty {
     }
 }
 
+/// Returns true iff the path segements matches one that is known to be
+/// uninhabited.
 fn match_uninhabited_pathsegs(segs: &[syn::PathSegment]) -> bool {
     util::match_pathsegs(segs, &[
         &["Infallible"],
