@@ -110,7 +110,7 @@ fn extract_modifiers(attr: syn::Attribute)
 }
 
 fn error_if_inner_attr(attr: &syn::Attribute) {
-    if !util::is_outer_attr(&attr) { error::outer_attr(); }
+    if !util::is_outer_attr(&attr) { error::inner_attr(); }
 }
 
 //==============================================================================
