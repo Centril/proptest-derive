@@ -4,12 +4,15 @@
 
 use syn;
 
+use attr;
 use util;
 
 // Perhaps ordermap would be better, but our maps are so small that we care
 // much more about the increased compile times incured by including ordermap.
 // We need to preserve insertion order in any case, so HashMap is not useful.
 use std::collections::BTreeMap;
+
+use std::mem;
 
 //==============================================================================
 // API: Type variable use tracking
@@ -61,7 +64,11 @@ impl UseTracker {
         let iter = self.used_map.values().zip(self.generics.ty_params.iter_mut());
         if let Some(for_not) = for_not {
             iter.for_each(|(&used, tv)| {
-                let bound = if used { &for_used } else { &for_not };
+                // Steal the attributes:
+                let attrs = mem::replace(&mut tv.attrs, vec![]);
+                let no_bound = attr::has_no_bound(attrs);
+
+                let bound = if used && !no_bound { &for_used } else { &for_not };
                 tv.bounds.push(bound.clone());
             });
         } else {

@@ -25,6 +25,9 @@ pub const ENUM_VARIANT: &'static str = "enum variant";
 /// Item name of enum variant fields.
 pub const ENUM_VARIANT_FIELD: &'static str = "enum variant field";
 
+/// Item name for a type variable.
+pub const TY_VAR: &'static str = "a type variable";
+
 //==============================================================================
 // Checkers
 //==============================================================================
@@ -284,13 +287,13 @@ pub fn immediate_literals() -> ! {
          `#[proptest(<lit>, ..)]` are not allowed.");
 }
 
-/// Happens when `<modifier>` in `#[proptest(<modifier>)]` was set more than
+/// Happens when `<modifier>` in `#[proptest(<modifier>)]` is set more than
 /// once.
-pub fn set_again(modifier: &str) -> ! {
+pub fn set_again(meta: &syn::MetaItem) -> ! {
     error!(E0017,
         "The attribute modifier `{}` inside `#[proptest(..)]` has already been \
          set. To fix the error, please remove at least one such modifier."
-        , modifier);
+        , meta.name());
 }
 
 /// Happens when `<modifier>` in `#[proptest(<modifier>)]` is unknown to
@@ -311,7 +314,7 @@ pub fn unkown_modifier(modifier: &str) -> ! {
         , modifier);
 }
 
-/// Happens when `#[proptest(no_params)]` was malformed.
+/// Happens when `#[proptest(no_params)]` is malformed.
 pub fn no_params_malformed() -> ! {
     error!(E0019,
         "The attribute modifier `no_params` inside `#[proptest(..)]` does not \
@@ -319,7 +322,7 @@ pub fn no_params_malformed() -> ! {
          `#[proptest(no_params)]`.");
 }
 
-/// Happens when `#[proptest(skip)]` was malformed.
+/// Happens when `#[proptest(skip)]` is malformed.
 pub fn skip_malformed() -> ! {
     error!(E0020,
         "The attribute modifier `skip` inside `#[proptest(..)]` does not \
@@ -327,7 +330,7 @@ pub fn skip_malformed() -> ! {
          `#[proptest(skip)]`.");
 }
 
-/// Happens when `#[proptest(weight..)]` was malformed.
+/// Happens when `#[proptest(weight..)]` is malformed.
 pub fn weight_malformed(attr_name: &str) -> ! {
     error!(E0021,
         "The attribute modifier `{0}` inside `#[proptest(..)]` must have the \
@@ -347,7 +350,7 @@ pub fn overspecified_param() -> ! {
          Please pick one of those attributes.");
 }
 
-/// Happens when `#[proptest(params..)]` was malformed.
+/// Happens when `#[proptest(params..)]` is malformed.
 pub fn param_malformed() -> ! {
     error!(E0023,
         "The attribute modifier `params` inside #[proptest(..)] must have the \
@@ -375,7 +378,7 @@ pub fn overspecified_strat() -> ! {
          Please pick one of those attributes.");
 }
 
-/// Happens when `#[proptest(strategy..)]` or `#[proptest(value..)]` was
+/// Happens when `#[proptest(strategy..)]` or `#[proptest(value..)]` is
 /// malformed.
 pub fn strategy_malformed(item: &str) -> ! {
     error!(E0026,
@@ -443,11 +446,28 @@ pub fn params_on_unit_variant() -> ! {
          no effect and is redundant because there is nothing to configure.");
 }
 
-/// Occurs when `#[proptest(params = "<type>")]` was specified on a unit
+/// Occurs when `#[proptest(params = "<type>")]` is specified on a unit
 /// struct. There's only one way to produce a unit struct, so specifying
 /// `Parameters` would be pointless.
 pub fn params_on_unit_struct() -> ! {
     error!(E0030,
         "Setting `#[proptest(params = \"<type>\")]` on a unit struct has \
          no effect and is redundant because there is nothing to configure.");
+}
+
+/// Occurs when `#[proptest(no_bound)]` is specified
+/// on something that is not a type variable.
+pub fn no_bound_set_on_non_tyvar() -> ! {
+    error!(E0031,
+        "Setting `#[proptest(no_bound)]` on something that is
+         not a type variable has no effect and is redundant. \
+         Therefore it is not allowed.");
+}
+
+/// Happens when `#[proptest(no_bound)]` is malformed.
+pub fn no_bound_malformed() -> ! {
+    error!(E0032,
+        "The attribute modifier `no_bound` inside `#[proptest(..)]` does not \
+         support any further configuration and must be a plain modifier as in \
+         `#[proptest(no_bound)]`.");
 }

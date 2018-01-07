@@ -25,6 +25,8 @@ pub struct ParsedAttributes {
     pub params: ParamsMode,
     /// The mode for `Strategy` to use. See that type for more.
     pub strategy: StratMode,
+    /// True if no_bound was specified.
+    pub no_bound: bool,
 }
 
 /// The mode for the associated item `Strategy` to use.
@@ -95,7 +97,27 @@ impl StratMode {
 /// Parse the attributes specified on an item and parsed by syn
 /// into our logical model that we work with.
 pub fn parse_attributes(attrs: Vec<syn::Attribute>) -> ParsedAttributes {
-    let (skip, weight, no_params, ty_params, strategy, value)
+    let attrs = parse_attributes_base(attrs);
+    if attrs.no_bound {
+        error::no_bound_set_on_non_tyvar();
+    }
+    attrs
+}
+
+/// Parses the attributes specified on an item and parsed by syn
+/// and returns true if we've been ordered to not set an `Arbitrary`
+/// bound on the given type variable the attributes are from,
+/// no matter what.
+pub fn has_no_bound(attrs: Vec<syn::Attribute>) -> bool {
+    let attrs = parse_attributes_base(attrs);
+    error::if_anything_specified(&attrs, error::TY_VAR);
+    attrs.no_bound
+}
+
+/// Parse the attributes specified on an item and parsed by syn
+/// into our logical model that we work with.
+fn parse_attributes_base(attrs: Vec<syn::Attribute>) -> ParsedAttributes {
+    let (skip, weight, no_params, ty_params, strategy, value, no_bound)
       = attrs.into_iter()
              // Get rid of attributes we don't care about:
              .filter(is_proptest_attr)
@@ -113,8 +135,10 @@ pub fn parse_attributes(attrs: Vec<syn::Attribute>) -> ParsedAttributes {
     // Was skip set?
     let skip = skip.is_some();
 
+    let no_bound = no_bound.is_some();
+
     // We're done.
-    ParsedAttributes { skip, weight, params, strategy }
+    ParsedAttributes { skip, weight, params, strategy, no_bound }
 }
 
 //==============================================================================
@@ -126,12 +150,14 @@ type PWeight   = Option<u32>;
 type PNoParams = Option<()>;
 type PTyParams = Option<syn::Ty>;
 type PStrategy = Option<syn::Expr>;
+type PNoBound  = Option<()>;
 type PAll      = (PSkip, PWeight,
                   PNoParams, PTyParams,
-                  PStrategy, PStrategy);
+                  PStrategy, PStrategy,
+                  PNoBound);
 
 /// The initial state in the accumulator inside `parse_attributes`.
-fn init_parse_state() -> PAll { (None, None, None, None, None, None) }
+fn init_parse_state() -> PAll { (None, None, None, None, None, None, None) }
 
 //==============================================================================
 // Internals: Extraction & Filtering
@@ -193,7 +219,9 @@ fn dispatch_attribute(mut acc: PAll, meta: syn::MetaItem) -> PAll {
             "params"        => parse_params,
             "strategy"      => parse_strategy,
             "value"         => parse_value,
+            "no_bound"      => parse_no_bound,
             // Invalid modifiers:
+            "no_bounds"     => error::did_you_mean(name, "no_bound"),
             "weights" |
             "weighted"      => error::did_you_mean(name, "weight"),
             "strat" |
@@ -217,6 +245,17 @@ fn dispatch_attribute(mut acc: PAll, meta: syn::MetaItem) -> PAll {
 }
 
 //==============================================================================
+// Internals: no_bound
+//==============================================================================
+
+/// Parse a no_bound attribute.
+/// Valid forms are:
+/// + `#[proptest(no_bound)]`
+fn parse_no_bound(set: &mut PAll, meta: syn::MetaItem) {
+    parse_bare_modifier(&mut set.6, meta, error::no_bound_malformed);
+}
+
+//==============================================================================
 // Internals: Skip
 //==============================================================================
 
@@ -224,9 +263,7 @@ fn dispatch_attribute(mut acc: PAll, meta: syn::MetaItem) -> PAll {
 /// Valid forms are:
 /// + `#[proptest(skip)]`
 fn parse_skip(set: &mut PAll, meta: syn::MetaItem) {
-    error_if_set(&set.0, "skip");
-    if let syn::MetaItem::Word(_) = meta { set.0 = Some(()); }
-    else { error::skip_malformed(); }
+    parse_bare_modifier(&mut set.0, meta, error::skip_malformed);
 }
 
 //==============================================================================
@@ -241,19 +278,17 @@ fn parse_weight(set: &mut PAll, meta: syn::MetaItem) {
     use std::u32;
     use syn::Lit;
 
-    let name = meta.name();
-
-    error_if_set(&set.1, name);
+    error_if_set(&set.1, &meta);
 
     if let syn::MetaItem::NameValue(_, Lit::Int(val, ty)) = meta {
         // Ensure that `val` fits within an `u32` as proptest requires that.
         if val <= u32::MAX as u64 && is_int_ty_unsigned(ty) {
             set.1 = Some(val as u32);  
         } else {
-            error::weight_malformed(name);
+            error::weight_malformed(meta.name());
         }
     } else {
-        error::weight_malformed(name);
+        error::weight_malformed(meta.name());
     }
 }
 
@@ -292,17 +327,16 @@ fn parse_strategy_base(set: &mut PStrategy, meta: syn::MetaItem) {
     use syn::Lit;
     use syn::StrStyle::Cooked;
 
-    let name = meta.name();
-    error_if_set(&set, name);
+    error_if_set(&set, &meta);
 
     if let NameValue(_, Lit::Str(ref lit, Cooked)) = meta {
         if let Ok(expr) = syn::parse_expr(lit.as_ref()) {
             *set = Some(expr);
         } else {
-            error::strategy_malformed_expr(name);
+            error::strategy_malformed_expr(meta.name());
         }
     } else {
-        error::strategy_malformed(name);
+        error::strategy_malformed(meta.name());
     }
 }
 
@@ -348,7 +382,7 @@ fn parse_params(set: &mut PAll, meta: syn::MetaItem) {
 
     let set = &mut set.3;
 
-    error_if_set(&set, "params");
+    error_if_set(&set, &meta);
 
     if let NameValue(_, Lit::Str(lit, Cooked)) = meta {
         // Form is: `#[proptest(params = "<type>"]`.
@@ -376,16 +410,22 @@ fn parse_params(set: &mut PAll, meta: syn::MetaItem) {
 /// Valid forms are:
 /// + `#[proptest(no_params)]`
 fn parse_no_params(set: &mut PAll, meta: syn::MetaItem) {
-    error_if_set(&set.2, "no_params");
-    if let syn::MetaItem::Word(_) = meta { set.2 = Some(()); }
-    else { error::no_params_malformed(); }
+    parse_bare_modifier(&mut set.2, meta, error::no_params_malformed);
 }
 
 //==============================================================================
 // Internals: Utilities
 //==============================================================================
 
+/// Parses a bare attribute of the form `#[proptest(<attr>)]` and sets `set`.
+fn parse_bare_modifier
+    (set: &mut Option<()>, meta: syn::MetaItem, malformed: fn() -> !) {
+    error_if_set(set, &meta);
+    if let syn::MetaItem::Word(_) = meta { *set = Some(()); }
+    else { malformed() }
+}
+
 /// Emits a "set again" error iff the given option `.is_some()`.
-fn error_if_set<T>(set: &Option<T>, attr: &str) {
-    if set.is_some() { error::set_again(attr); }
+fn error_if_set<T>(set: &Option<T>, meta: &syn::MetaItem) {
+    if set.is_some() { error::set_again(meta); }
 }
