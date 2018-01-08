@@ -17,7 +17,6 @@ use attr::{parse_attributes, ParamsMode, ParsedAttributes, StratMode};
 use use_tracking::{UseMarkable, UseTracker};
 use ast::*;
 
-// TODO: Handle arrays > 32.
 // TODO: Handle recursive types.
 
 //==============================================================================
