@@ -15,7 +15,6 @@ use quote::{ToTokens, Tokens};
 
 use util::*;
 use use_tracking::*;
-use array::*;
 
 use std::ops::{Add, AddAssign};
 use std::mem;
@@ -54,9 +53,6 @@ pub struct Impl {
     tracker: UseTracker,
     /// The three main parts, see description of `ImplParts` for details.
     parts: ImplParts,
-    /// <TEMPORARY FIX, REMOVE WITH CONST GENERICS!>
-    /// The array sizes that we need to make strategies for.
-    as_tracker: ArraySizeTracker,
 }
 
 /// The three main parts to deriving `Arbitrary` for a type.
@@ -67,16 +63,14 @@ pub type ImplParts = (Params, Strategy, Ctor);
 
 impl Impl {
     /// Constructs a new `Impl` from the parts as described on the type.
-    pub fn new(typ: syn::Ident, tracker: UseTracker, parts: ImplParts,
-               as_tracker: ArraySizeTracker) -> Self {
-        Self { typ, tracker, parts, as_tracker }
+    pub fn new(typ: syn::Ident, tracker: UseTracker, parts: ImplParts) -> Self {
+        Self { typ, tracker, parts }
     }
 
     /// Linearises the impl into a sequence of tokens.
     /// This produces the actual Rust code for the impl.
     pub fn to_tokens(self) -> Tokens {
-        let Impl { typ, mut tracker, parts: (params, strategy, ctor)
-                 , as_tracker } = self;
+        let Impl { typ, mut tracker, parts: (params, strategy, ctor) } = self;
 
         /// A `Debug` bound on a type variable.
         fn debug_bound() -> syn::TyParamBound {
@@ -116,8 +110,6 @@ impl Impl {
                     #ctor
                 }
             }
-
-            #as_tracker
         }
     }
 }
@@ -130,30 +122,15 @@ impl Impl {
 pub type StratPair = (Strategy, Ctor);
 
 /// The type and constructor for `any::<Type>()`.
-pub fn pair_any(as_tracker: &mut ArraySizeTracker, ty: syn::Ty) -> StratPair {
-    match as_tracker.track_type(ty) {
-        Either::Left(ty) => {
-            let q = Ctor::Arbitrary(ty.clone(), None);
-            (Strategy::Arbitrary(ty), q)
-        },
-        Either::Right((inner_ty, uasp)) => {
-            let q = Ctor::ArrayArbitrary(inner_ty.clone(), uasp.clone(), None);
-            (Strategy::ArrayArbitrary(inner_ty, uasp), q)
-        }
-    }
+pub fn pair_any(ty: syn::Ty) -> StratPair {
+    let q = Ctor::Arbitrary(ty.clone(), None);
+    (Strategy::Arbitrary(ty), q)
 }
 
 /// The type and constructor for `any_with::<Type>(parameters)`.
 pub fn pair_any_with(ty: syn::Ty, var: usize) -> StratPair {
     let q = Ctor::Arbitrary(ty.clone(), Some(var));
     (Strategy::Arbitrary(ty), q)
-}
-
-/// The type and constructor for `any_with::<Type>(parameters)`.
-/// The array version. Temporary hack.
-pub fn pair_any_with_arr(ty: syn::Ty, var: usize, uasp: UASParts) -> StratPair {
-    let q = Ctor::ArrayArbitrary(ty.clone(), uasp.clone(), Some(var));
-    (Strategy::ArrayArbitrary(ty, uasp), q)
 }
 
 /// The type and constructor for a specific strategy value
@@ -320,8 +297,6 @@ fn arbitrary_seg() -> syn::PathSegment {
 
 /// The type of a given `Strategy`.
 pub enum Strategy {
-    /// Strategy for `[$ty; <usize>]` where `$ty` is generated with Arbitrary.
-    ArrayArbitrary(syn::Ty, UASParts),
     /// Assuming the metavariable `$ty` for a given type, this models
     /// the strategy type `<$ty as Arbitrary<'a>::Strategy`.
     Arbitrary(syn::Ty),
@@ -353,19 +328,11 @@ impl ToTokens for Strategy {
         // save for union which is described separately.
         use self::Strategy::*;
         match *self {
-            ArrayArbitrary(ref ty, (size, ref impl_id)) => {
-                uniform_array_strategy_ident(&*impl_id).to_tokens(tokens);
+            Arbitrary(ref ty) => {
                 tokens.append("<");
-                arbitrary_strat_tokens(tokens, ty);
-                tokens.append(",");
-                tokens.append("[");
                 ty.to_tokens(tokens);
-                tokens.append(";");
-                size.to_tokens(tokens);
-                tokens.append("]");
-                tokens.append(">");
+                tokens.append(" as ::proptest_arbitrary::Arbitrary<'a>>::Strategy");
             },
-            Arbitrary(ref ty) => arbitrary_strat_tokens(tokens, ty),
             Existential(ref ty) => {
                 tokens.append("::proptest::strategy::BoxedStrategy<");
                 ty.to_tokens(tokens);
@@ -386,14 +353,6 @@ impl ToTokens for Strategy {
             Union(ref strats) => union_strat_to_tokens(tokens, strats),
         }
     }
-}
-
-/// Adds tokens for the associated item `Strategy`
-/// of `Arbitrary` for the given type.
-fn arbitrary_strat_tokens(tokens: &mut Tokens, ty: &syn::Ty) {
-    tokens.append("<");
-    ty.to_tokens(tokens);
-    tokens.append(" as ::proptest_arbitrary::Arbitrary<'a>>::Strategy");
 }
 
 //==============================================================================
@@ -425,8 +384,6 @@ pub enum ToReg {
 
 /// Models an expression that generates a proptest `Strategy`.
 pub enum Ctor {
-    /// Strategy for `[$ty; <usize>]` where `$ty` is generated with Arbitrary.
-    ArrayArbitrary(syn::Ty, UASParts, Option<usize>),
     /// A strategy generated by using the `Arbitrary` impl
     /// for the given `Ty´. If `Some(idx)` is specified, then
     /// a parameter at `params_<idx>` is used and provided
@@ -496,13 +453,17 @@ impl ToTokens for Ctor {
                 ctor.to_tokens(tokens);
                 tokens.append("}");
             },
-            ArrayArbitrary(ref ty, (_, ref impl_id), fv) => {
-                uniform_array_strategy_ident(&*impl_id).to_tokens(tokens);
-                tokens.append("::new(");
-                arbitrary_ctor_tokens(tokens, ty, fv);
+            Arbitrary(ref ty, fv) => if let Some(fv) = fv {                    
+                tokens.append("::proptest_arbitrary::any_with::<");
+                ty.to_tokens(tokens);
+                tokens.append(">(");
+                param(fv).to_tokens(tokens);
                 tokens.append(")");
+            } else {
+                tokens.append("::proptest_arbitrary::any::<");
+                ty.to_tokens(tokens);
+                tokens.append(">()");
             },
-            Arbitrary(ref ty, fv) => arbitrary_ctor_tokens(tokens, ty, fv),
             Existential(ref expr) => {
                 tokens.append("::proptest::strategy::Strategy::boxed(");
                 expr.to_tokens(tokens);
@@ -522,22 +483,6 @@ impl ToTokens for Ctor {
             },
             Union(ref ctors) => union_ctor_to_tokens(tokens, ctors),
         }
-    }
-}
-
-/// Adds tokens for the expression constructing the associated
-/// item `Strategy` of `Arbitrary` for the given type.
-fn arbitrary_ctor_tokens(tokens: &mut Tokens, ty: &syn::Ty, fv: Option<usize>) {
-    if let Some(fv) = fv {                    
-        tokens.append("::proptest_arbitrary::any_with::<");
-        ty.to_tokens(tokens);
-        tokens.append(">(");
-        param(fv).to_tokens(tokens);
-        tokens.append(")");
-    } else {
-        tokens.append("::proptest_arbitrary::any::<");
-        ty.to_tokens(tokens);
-        tokens.append(">()");
     }
 }
 
