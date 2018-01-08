@@ -8,6 +8,8 @@
 
 //! TODO
 
+#![recursion_limit="128"]
+
 extern crate proc_macro;
 use proc_macro::TokenStream;
 
@@ -21,6 +23,7 @@ mod error;
 mod use_tracking;
 mod attr;
 mod ast;
+mod array;
 mod derive;
 
 /// TODO

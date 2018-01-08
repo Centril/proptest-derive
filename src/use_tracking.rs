@@ -104,8 +104,13 @@ impl UseMarkable for syn::Ty {
     fn mark_uses(&self, ut: &mut UseTracker) {
         use syn::visit;
 
+        visit::walk_ty(&mut PathVisitor(ut), self);
+
         struct PathVisitor<'a>(&'a mut UseTracker);
+
         impl<'a> visit::Visitor for PathVisitor<'a> {
+            fn visit_mac(&mut self, _mac: &syn::Mac) {}
+
             fn visit_path(&mut self, path: &syn::Path) {
                 // If path is PhantomData do not mark innards.
                 if util::is_phantom_data(path) { return; }
@@ -118,14 +123,8 @@ impl UseMarkable for syn::Ty {
                 visit::walk_path(self, path);
             }
 
-            // See:
-            // https://github.com/serde-rs/serde/blob/master/serde_derive/src/bound.rs#L116-L122
-            fn visit_mac(&mut self, _mac: &syn::Mac) {}
-
             // TODO: Consider BareFnTy and ParenthesizedParameterData wrt.
             // CoArbitrary.
         }
-
-        visit::walk_ty(&mut PathVisitor(ut), self);
     }
 }

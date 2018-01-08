@@ -16,6 +16,8 @@ use error;
 use attr::{parse_attributes, ParamsMode, ParsedAttributes, StratMode};
 use use_tracking::{UseMarkable, UseTracker};
 use ast::*;
+use array::Either::{Left, Right};
+use array::ArraySizeTracker as ASTracker;
 
 // TODO: Handle arrays > 32.
 // TODO: Handle recursive types.
@@ -30,19 +32,20 @@ pub fn impl_proptest_arbitrary(ast: syn::DeriveInput) -> Tokens {
     error::if_has_lifetimes(&ast);
 
     let tracker = UseTracker::new(ast.generics);
+    let as_tracker = ASTracker::new(ast.ident.clone());
 
     // Compile into our own high level IR for the impl:
     #[allow(unreachable_patterns)]
     let the_impl = match ast.body {
         // Deal with structs:
-        syn::Body::Struct(vd) => derive_struct(DeriveInput {
+        syn::Body::Struct(vd) => derive_struct(as_tracker, DeriveInput {
             tracker,
             ident: ast.ident,
             attrs: ast.attrs,
             body: variant_data_to_fields(vd),
         }),
         // Deal with enums:
-        syn::Body::Enum(variants) => derive_enum(DeriveInput {
+        syn::Body::Enum(variants) => derive_enum(as_tracker, DeriveInput {
             tracker,
             ident: ast.ident,
             attrs: ast.attrs,
@@ -67,7 +70,8 @@ pub fn impl_proptest_arbitrary(ast: syn::DeriveInput) -> Tokens {
 //==============================================================================
 
 /// Entry point for deriving `Arbitrary` for `struct`s.
-fn derive_struct(mut ast: DeriveInput<Vec<syn::Field>>) -> Impl {
+fn derive_struct(mut as_tracker: ASTracker,
+    mut ast: DeriveInput<Vec<syn::Field>>) -> Impl {
     // Ensure that the type is inhabited:
     error::if_uninhabited_fields(&ast.body);
 
@@ -95,17 +99,17 @@ fn derive_struct(mut ast: DeriveInput<Vec<syn::Field>>) -> Impl {
         // parameters were set directly on the type or not.
         if let Some(param_ty) = t_attrs.params.to_option() {
             // Parameters was set on the struct itself, the logic is simpler.
-            add_top_params(param_ty, derive_product_has_params(
+            add_top_params(param_ty, derive_product_has_params(&mut as_tracker,
                 &mut ast.tracker, error::STRUCT_FIELD, closure, ast.body))
         } else {
             // We need considerably more complex logic.
-            derive_product_no_params(
+            derive_product_no_params(&mut as_tracker,
                 &mut ast.tracker, ast.body, error::STRUCT_FIELD).finish(closure)
         }
     };
 
     // We're done!
-    Impl::new(ast.ident, ast.tracker, parts)
+    Impl::new(ast.ident, ast.tracker, parts, as_tracker)
 }
 
 /// Determine the `Parameters` part. We've already handled everything else.
@@ -125,7 +129,7 @@ fn add_top_params(param_ty: Option<syn::Ty>, (strat, ctor): StratPair)
 
 /// Deriving for a list of fields (product type) on
 /// which `params` or `no_params` was set directly.
-fn derive_product_has_params(
+fn derive_product_has_params(as_tracker: &mut ASTracker,
     ut: &mut UseTracker, item: &str, closure: MapClosure, fields: Vec<syn::Field>)
     -> StratPair
 {
@@ -143,13 +147,15 @@ fn derive_product_has_params(
         error::if_specified_params(&attrs, item);
 
         // Determine the strategy for this field and add it to acc.
-        acc.add(product_handle_default_params(ut, field.ty, attrs.strategy))
+        acc.add(product_handle_default_params(as_tracker,
+            ut, field.ty, attrs.strategy))
     }).finish(closure)
 }
 
 /// Determine strategy using "Default" semantics  for a product.
 fn product_handle_default_params
-    (ut: &mut UseTracker, ty: syn::Ty, strategy: StratMode) -> StratPair {
+    (as_tracker: &mut ASTracker,
+     ut: &mut UseTracker, ty: syn::Ty, strategy: StratMode) -> StratPair {
     match strategy {
         // Specific strategy - use the given expr and erase the type
         // (since we don't know about it):
@@ -157,14 +163,15 @@ fn product_handle_default_params
         // Specific value - use the given expr:
         StratMode::Value(value) => pair_value(ty, value),
         // Use Arbitrary for the given type and mark the type as used:
-        StratMode::Arbitrary => { ty.mark_uses(ut); pair_any(ty) },
+        StratMode::Arbitrary => { ty.mark_uses(ut); pair_any(as_tracker, ty) },
     }
 }
 
 /// Deriving for a list of fields (product type) on
 /// which `params` or `no_params` was NOT set directly.
 fn derive_product_no_params
-    (ut: &mut UseTracker, fields: Vec<syn::Field>, item: &str)
+    (as_tracker: &mut ASTracker,
+     ut: &mut UseTracker, fields: Vec<syn::Field>, item: &str)
     -> PartsAcc<Ctor>
 {
     // Fold into an accumulator of the strategy types and the expressions
@@ -188,14 +195,26 @@ fn derive_product_no_params
                 // Use Arbitrary for the given type and mark the type as used:
                 StratMode::Arbitrary => {
                     ty.mark_uses(ut);
+
                     // We use the Parameters type of the field's type.
-                    let pref = acc.add_param(arbitrary_param(ty.clone()));
-                    pair_any_with(ty, pref)
+                    match as_tracker.track_type(ty) {
+                        Left(ty) => {
+                            // Not special cased for array.
+                            let pref = acc.add_param(arbitrary_param(ty.clone()));
+                            pair_any_with(ty, pref)
+                        },
+                        Right((ty, uasp)) => {
+                            // Special cased for array.
+                            let pref = acc.add_param(arbitrary_param(ty.clone()));
+                            pair_any_with_arr(ty, pref, uasp)
+                        },
+                    }
                 },
             },
             // no_params set on the field:
             ParamsMode::Default =>
-                product_handle_default_params(ut, ty, attrs.strategy),
+                product_handle_default_params(as_tracker,
+                    ut, ty, attrs.strategy),
             // params(<type>) set on the field:
             ParamsMode::Specified(params_ty) => match attrs.strategy {
                 // Specific strategy - use the given expr and erase the type:
@@ -230,7 +249,8 @@ fn extract_nparam<C>
 //==============================================================================
 
 /// Entry point for deriving `Arbitrary` for `enum`s.
-fn derive_enum(mut ast: DeriveInput<Vec<syn::Variant>>) -> Impl {
+fn derive_enum(mut as_tracker: ASTracker,
+    mut ast: DeriveInput<Vec<syn::Variant>>) -> Impl {
     use void::IsUninhabited;
 
     // Bail if there are no variants:
@@ -258,18 +278,20 @@ fn derive_enum(mut ast: DeriveInput<Vec<syn::Variant>>) -> Impl {
     // parameters were set directly on the type or not.
     let parts = if let Some(sty) = t_attrs.params.to_option() {
         // The logic is much simpler in this branch.
-        derive_enum_has_params(&mut ast.tracker, &ast.ident, ast.body, sty)
+        derive_enum_has_params(&mut as_tracker,
+            &mut ast.tracker, &ast.ident, ast.body, sty)
     } else {
         // And considerably more complex here.
-        derive_enum_no_params(&mut ast.tracker, &ast.ident, ast.body)
+        derive_enum_no_params(&mut as_tracker,
+            &mut ast.tracker, &ast.ident, ast.body)
     };
 
     // We're done!
-    Impl::new(ast.ident, ast.tracker, parts)
+    Impl::new(ast.ident, ast.tracker, parts, as_tracker)
 }
 
 /// Deriving for a enum on which `params` or `no_params` was NOT set directly.
-fn derive_enum_no_params(
+fn derive_enum_no_params(as_tracker: &mut ASTracker,
     ut: &mut UseTracker, _self: &syn::Ident, variants: Vec<syn::Variant>)
     -> ImplParts
 {
@@ -289,7 +311,7 @@ fn derive_enum_no_params(
             pair_unit_variant(&attrs, path)
         } else {
             // Not a unit variant:
-            derive_variant_with_fields(ut, path, attrs, fields, &mut acc)
+            derive_variant_with_fields(as_tracker, ut, path, attrs, fields, &mut acc)
         };
         acc.add_strat((strat, (weight, ctor)))
     });
@@ -312,7 +334,8 @@ fn ensure_union_has_strategies<C>(strats: &StratAcc<C>) {
 /// Derive for a variant which has fields and where the
 /// variant or its fields may specify `params` or `no_params`.
 fn derive_variant_with_fields<C>
-    (ut: &mut UseTracker, v_path: VariantPath, attrs: ParsedAttributes,
+    (as_tracker: &mut ASTracker,
+     ut: &mut UseTracker, v_path: VariantPath, attrs: ParsedAttributes,
      fields: Vec<syn::Field>, acc: &mut PartsAcc<C>)
     -> StratPair
 {
@@ -333,8 +356,8 @@ fn derive_variant_with_fields<C>
             StratMode::Arbitrary => {
                 // Compute parts for the inner product:
                 let closure = map_closure(v_path, &fields);
-                let fields_acc = derive_product_no_params(ut, fields,
-                                    error::ENUM_VARIANT_FIELD);
+                let fields_acc = derive_product_no_params(as_tracker,
+                                    ut, fields, error::ENUM_VARIANT_FIELD);
                 let (params, count) = fields_acc.params.consume();
                 let (strat, ctor) = fields_acc.strats.finish(closure);
 
@@ -353,7 +376,7 @@ fn derive_variant_with_fields<C>
         },
         // no_params set on the field:
         ParamsMode::Default =>
-            variant_handle_default_params(ut, v_path, attrs, fields),
+            variant_handle_default_params(as_tracker, ut, v_path, attrs, fields),
         // params(<type>) set on the field:
         ParamsMode::Specified(params_ty) => match attrs.strategy {
             // Specific strategy - use the given expr and erase the type:
@@ -375,8 +398,9 @@ fn derive_variant_with_fields<C>
 }
 
 /// Determine strategy using "Default" semantics for a variant.
-fn variant_handle_default_params(ut: &mut UseTracker,
-    v_path: VariantPath, attrs: ParsedAttributes, fields: Vec<syn::Field>)
+fn variant_handle_default_params(as_tracker: &mut ASTracker,
+    ut: &mut UseTracker, v_path: VariantPath, attrs: ParsedAttributes,
+    fields: Vec<syn::Field>)
     -> StratPair {
     match attrs.strategy {
         // Specific strategy - use the given expr and erase the type:
@@ -392,7 +416,8 @@ fn variant_handle_default_params(ut: &mut UseTracker,
         // Use Arbitrary for the factors (fields) of variant:
         StratMode::Arbitrary =>
             // Fields are not allowed to specify params.
-            derive_product_has_params(ut, error::ENUM_VARIANT_FIELD,
+            derive_product_has_params(as_tracker,
+                ut, error::ENUM_VARIANT_FIELD,
                 map_closure(v_path, &fields), fields),
     }
 }
@@ -407,7 +432,7 @@ fn deny_all_attrs_on_fields(fields: Vec<syn::Field>) {
 
 /// Derive for a variant which has fields and where the
 /// variant or its fields may NOT specify `params` or `no_params`.
-fn derive_enum_has_params(
+fn derive_enum_has_params(as_tracker: &mut ASTracker,
     ut: &mut UseTracker, _self: &syn::Ident, variants: Vec<syn::Variant>,
     sty: Option<syn::Ty>)
     -> ImplParts
@@ -428,7 +453,7 @@ fn derive_enum_has_params(
             pair_unit_variant(&attrs, path)
         } else {
             // Not a unit variant:
-            variant_handle_default_params(ut, path, attrs, fields)
+            variant_handle_default_params(as_tracker, ut, path, attrs, fields)
         };
         acc.add((strat, (weight, ctor)))
     });
