@@ -38,7 +38,7 @@ mod attr;
 mod ast;
 mod derive;
 
-/// TODO
+/// See module level documentation for more information.
 #[proc_macro_derive(Arbitrary, attributes(proptest))]
 pub fn derive_proptest_arbitrary(input: TokenStream) -> TokenStream {
     // Bootstrap!
