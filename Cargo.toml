@@ -23,8 +23,8 @@ maintenance = { status = "experimental" }
 proc-macro = true
 
 [dev-dependencies]
-proptest = "0.3.2"
-proptest-arbitrary = { path = "../proptest-arbitrary" }
+proptest = { path = "../proptest" }
+#proptest-arbitrary = { path = "../proptest-arbitrary" }
 
 [dependencies]
 

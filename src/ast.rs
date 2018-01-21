@@ -81,21 +81,20 @@ impl Impl {
         /// An `Arbitrary` bound on a type variable.
         fn arbitrary_bound() -> syn::TyParamBound {
             make_path_bound(global_path(
-                vec!["proptest_arbitrary".into(), arbitrary_seg()]))
+                idents_to_path(&["proptest", "arbitrary", "Arbitrary"])))
         }
 
         // Add bounds and get generics for the impl.
         tracker.add_bounds(arbitrary_bound(), Some(debug_bound()));
         let generics = tracker.consume();
-        let lt_arb = syn::LifetimeDef::new("'a");
         let (impl_generics, ty_generics, where_clause)
-          = split_for_impl(from_ref(&lt_arb), &generics);
+          = generics.split_for_impl();
 
         let _top = syn::Ident::from(TOP_PARAM_NAME);
 
         // Linearise everything. We're done after this.
         quote! {
-            impl #impl_generics ::proptest_arbitrary::Arbitrary<#lt_arb>
+            impl #impl_generics ::proptest::arbitrary::Arbitrary
             for #typ #ty_generics #where_clause {
                 type ValueTree =
                     <Self::Strategy as ::proptest::strategy::Strategy>::Value;
@@ -104,9 +103,7 @@ impl Impl {
 
                 type Strategy = #strategy;
 
-                fn arbitrary_with(#_top: Self::Parameters)
-                    -> Self::Strategy
-                {
+                fn arbitrary_with(#_top: Self::Parameters) -> Self::Strategy {
                     #ctor
                 }
             }
@@ -277,18 +274,13 @@ pub fn arbitrary_param(ty: syn::Ty) -> syn::Ty {
     /// Returns for a given type `ty` the associated `item` of the
     /// type's `Arbitrary` implementation.
     fn arbitrary_item(ty: syn::Ty, item: &str) -> syn::Ty {
-        let segs = vec!["proptest_arbitrary".into(),
-                        arbitrary_seg(), item.into()];
+        let segs = idents_to_path(&["proptest", "arbitrary", "Arbitrary",
+                        item.into()]);
         let qself = syn::QSelf { position: segs.len() - 1, ty: ty.into(), };
         syn::Ty::Path(Some(qself), global_path(segs))
     }
 
     arbitrary_item(ty, "Parameters")
-}
-
-/// Linearises to `Arbitrary<'a>`.
-fn arbitrary_seg() -> syn::PathSegment {
-    parametric_path_segment("Arbitrary", param_lf(syn::Lifetime::new("'a")))
 }
 
 //==============================================================================
@@ -298,7 +290,7 @@ fn arbitrary_seg() -> syn::PathSegment {
 /// The type of a given `Strategy`.
 pub enum Strategy {
     /// Assuming the metavariable `$ty` for a given type, this models
-    /// the strategy type `<$ty as Arbitrary<'a>::Strategy`.
+    /// the strategy type `<$ty as Arbitrary>::Strategy`.
     Arbitrary(syn::Ty),
     /// Assuming the metavariable `$ty` for a given type, this models
     /// the strategy type `BoxedStrategy<$ty>`, i.e: an existentially
@@ -331,7 +323,7 @@ impl ToTokens for Strategy {
             Arbitrary(ref ty) => {
                 tokens.append("<");
                 ty.to_tokens(tokens);
-                tokens.append(" as ::proptest_arbitrary::Arbitrary<'a>>::Strategy");
+                tokens.append(" as ::proptest::arbitrary::Arbitrary>::Strategy");
             },
             Existential(ref ty) => {
                 tokens.append("::proptest::strategy::BoxedStrategy<");
@@ -339,15 +331,15 @@ impl ToTokens for Strategy {
                 tokens.append(">");
             },
             Value(ref ty) => {
-                tokens.append("::proptest_arbitrary::FnGenerator<");
+                tokens.append("::proptest::strategy::LazyJustFn<");
                 ty.to_tokens(tokens);
                 tokens.append(">");
             },
             Map(ref strats) => {
                 tokens.append("::proptest::strategy::Map<");
-                tuple_to_tokens(tokens, strats.iter());
+                tuple_to_tokens2(tokens, &strats);
                 tokens.append(", fn(::proptest::strategy::ValueFor<");
-                tuple_to_tokens(tokens, strats.iter());
+                tuple_to_tokens2(tokens, &strats);
                 tokens.append(">) -> Self>");
             },
             Union(ref strats) => union_strat_to_tokens(tokens, strats),
@@ -454,13 +446,13 @@ impl ToTokens for Ctor {
                 tokens.append("}");
             },
             Arbitrary(ref ty, fv) => if let Some(fv) = fv {                    
-                tokens.append("::proptest_arbitrary::any_with::<");
+                tokens.append("::proptest::arbitrary::any_with::<");
                 ty.to_tokens(tokens);
                 tokens.append(">(");
                 param(fv).to_tokens(tokens);
                 tokens.append(")");
             } else {
-                tokens.append("::proptest_arbitrary::any::<");
+                tokens.append("::proptest::arbitrary::any::<");
                 ty.to_tokens(tokens);
                 tokens.append(">()");
             },
@@ -470,13 +462,13 @@ impl ToTokens for Ctor {
                 tokens.append(")");
             },
             Value(ref expr) => {
-                tokens.append("::proptest_arbitrary::FnGenerator::new(||");
+                tokens.append("::proptest::strategy::LazyJustFn::new(||");
                 expr.to_tokens(tokens);
                 tokens.append(")");
             },
             Map(ref ctors, ref closure) => {
                 tokens.append("::proptest::strategy::Strategy::prop_map(");
-                tuple_to_tokens(tokens, ctors.iter());
+                tuple_to_tokens2(tokens, &ctors);
                 tokens.append(",");
                 closure.to_tokens(tokens);
                 tokens.append(")");
@@ -792,6 +784,20 @@ impl<'a> ToTokens for FreshVar<'a> {
 //==============================================================================
 // Util
 //==============================================================================
+
+/// Append a comma separated tuple to a token stream.
+fn tuple_to_tokens2<T>(tokens: &mut Tokens, tuple: &[T])
+where
+    T: ToTokens,
+{
+    if tuple.len() == 1 {
+        tuple[0].to_tokens(tokens);
+    } else {
+        tokens.append("(");
+        tokens.append_separated(tuple, ",");
+        tokens.append(")");
+    }
+}
 
 /// Append a comma separated tuple to a token stream.
 fn tuple_to_tokens<T, I>(tokens: &mut Tokens, tuple: I)

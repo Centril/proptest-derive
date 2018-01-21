@@ -9,71 +9,10 @@
 //! Mostly useful utilities for syn used in the crate.
 
 use syn;
-use quote::{Tokens, ToTokens};
 
 use use_tracking;
 
 use std::borrow::Borrow;
-
-//==============================================================================
-// split_for_impl
-//==============================================================================
-
-/// This is a bit unfortunate that we have to duplicate this effort...
-/// However, syn provides no method at the moment for playing tyvars and
-/// lifetime variables on the trait, so we have to do this.
-pub fn split_for_impl<'a>
-    (trait_ls: &'a [syn::LifetimeDef], generics: &'a syn::Generics)
-    -> (ImplGenerics<'a>, syn::TyGenerics<'a>, &'a syn::WhereClause)
-{
-    let (_, ty_generics, where_clause) = generics.split_for_impl();
-    let impl_generics = ImplGenerics {
-        generics: generics,
-        trait_ls: trait_ls,
-    };
-    (impl_generics, ty_generics, where_clause)
-}
-
-pub struct ImplGenerics<'a> {
-    trait_ls: &'a [syn::LifetimeDef],
-    generics: &'a syn::Generics,
-}
-
-impl<'a> ToTokens for ImplGenerics<'a> {
-    fn to_tokens(&self, tokens: &mut Tokens) {
-        // Logic derived almost entirely from the syn crate.
-        // Therefore some bits of this is owned (copyrighted) by David Tolnay.
-        let t_lifetimes = self.trait_ls;
-        let g_lifetimes = &self.generics.lifetimes;
-        let g_ty_params = &self.generics.ty_params;
-
-        let has_lifetimes = !t_lifetimes.is_empty() || !g_lifetimes.is_empty();
-        let has_ty_params = !g_ty_params.is_empty();
-
-        if has_lifetimes || has_ty_params {
-            tokens.append("<");
-            tokens.append_separated(t_lifetimes, ",");
-            tokens.append_separated(g_lifetimes, ",");
-            // Leave off the type parameter defaults
-            for (i, ty_param) in self.generics
-                    .ty_params
-                    .iter()
-                    .enumerate() {
-                if i > 0 || has_lifetimes {
-                    tokens.append(",");
-                }
-                tokens.append_all(
-                    ty_param.attrs.iter().filter(|attr| is_outer_attr(attr)));
-                ty_param.ident.to_tokens(tokens);
-                if !ty_param.bounds.is_empty() {
-                    tokens.append(":");
-                    tokens.append_separated(&ty_param.bounds, "+");
-                }
-            }
-            tokens.append(">");
-        }
-    }
-}
 
 //==============================================================================
 // General AST manipulation and types
@@ -112,32 +51,6 @@ pub fn is_outer_attr(attr: &syn::Attribute) -> bool {
 /// a `syn::Path` out of a specific known path.
 pub fn idents_to_path(idents: &[&str]) -> Vec<syn::PathSegment> {
     idents.iter().map(|&id| id.into()).collect()
-}
-
-/// Helper for constructing a path segment with possible parameters.
-pub fn parametric_path_segment
-    (ident: &str, param_data: syn::AngleBracketedParameterData)
-    -> syn::PathSegment
-{
-    syn::PathSegment {
-        ident: ident.into(),
-        parameters: syn::PathParameters::AngleBracketed(param_data)
-    }
-}
-
-/// Constructs parameter data for the given lifetime.
-/// This is useful for specifying the `<'a>` in `Arbitrary<'a>`.
-pub fn param_lf(lf: syn::Lifetime) -> syn::AngleBracketedParameterData {
-    parameters(vec![lf], vec![], vec![])
-}
-
-/// A shorthand for struct literal syntax for `syn::AngleBracketedParameterData`.
-pub fn parameters
-    ( lifetimes: Vec<syn::Lifetime>
-    , types: Vec<syn::Ty>
-    , bindings: Vec<syn::TypeBinding>)
-    -> syn::AngleBracketedParameterData {
-    syn::AngleBracketedParameterData { lifetimes, types, bindings }
 }
 
 /// Returns a global (prefixed by `::`) path from the given path segments.
@@ -222,11 +135,4 @@ pub fn is_unit_type<T: Borrow<syn::Ty>>(ty: T) -> bool {
 pub fn match_singleton<T>(slice: &[T]) -> Option<&T> {
     let mut it = slice.into_iter();
     if let (Some(x), None) = (it.next(), it.next()) { Some(x) } else { None }
-}
-
-/// From libcore. TODO: Replace with libcore once stable.
-pub fn from_ref<T>(s: &T) -> &[T] {
-    unsafe {
-        ::std::slice::from_raw_parts(s, 1)
-    }
 }
