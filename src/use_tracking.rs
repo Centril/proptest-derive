@@ -10,17 +10,16 @@
 //! track uses of type variables that need `Arbitrary` bounds in our
 //! impls.
 
-use syn;
-
-use attr;
-use util;
-
 // Perhaps ordermap would be better, but our maps are so small that we care
 // much more about the increased compile times incured by including ordermap.
 // We need to preserve insertion order in any case, so HashMap is not useful.
 use std::collections::BTreeMap;
-
 use std::mem;
+
+use syn;
+
+use attr;
+use util;
 
 //==============================================================================
 // API: Type variable use tracking
@@ -29,7 +28,6 @@ use std::mem;
 /// `UseTracker` tracks what type variables that have used in
 /// `any_with::<Type>` or similar and thus needs an `Arbitrary<'a>`
 /// bound added to them.
-#[derive(Debug)]
 pub struct UseTracker {
     /// Tracks 'usage' of a type variable name.
     /// Allocation of this map will happen at once and no further
@@ -52,7 +50,7 @@ impl UseTracker {
     pub fn new(generics: syn::Generics) -> Self {
         // Construct the map by setting all type variables as being unused
         // initially. This is the only time we will allocate for the map.
-        let used_map = generics.ty_params.iter()
+        let used_map = generics.type_params()
             .map(|v| (v.ident.as_ref().into(), false))
             .collect();
         Self { generics, used_map }
@@ -68,8 +66,8 @@ impl UseTracker {
     /// Adds the bound in `for_used` on used type variables and
     /// the bound in `for_not` (`if .is_some()`) on unused type variables.
     pub fn add_bounds(&mut self,
-        for_used: syn::TyParamBound, for_not: Option<syn::TyParamBound>) {
-        let iter = self.used_map.values().zip(self.generics.ty_params.iter_mut());
+        for_used: syn::TypeParamBound, for_not: Option<syn::TypeParamBound>) {
+        let iter = self.used_map.values().zip(self.generics.type_params_mut());
         if let Some(for_not) = for_not {
             iter.for_each(|(&used, tv)| {
                 // Steal the attributes:
@@ -100,16 +98,16 @@ impl UseTracker {
 // It would be really nice to use SYB programming here, but these are not our
 // types, wherefore using scrapmetal would result in orphan impls.
 
-impl UseMarkable for syn::Ty {
+impl UseMarkable for syn::Type {
     fn mark_uses(&self, ut: &mut UseTracker) {
         use syn::visit;
 
-        visit::walk_ty(&mut PathVisitor(ut), self);
+        visit::visit_type(&mut PathVisitor(ut), self);
 
         struct PathVisitor<'a>(&'a mut UseTracker);
 
-        impl<'a> visit::Visitor for PathVisitor<'a> {
-            fn visit_mac(&mut self, _mac: &syn::Mac) {}
+        impl<'a, 'ast> visit::Visit<'ast> for PathVisitor<'a> {
+            fn visit_macro(&mut self, _: &syn::Macro) {}
 
             fn visit_path(&mut self, path: &syn::Path) {
                 // If path is PhantomData do not mark innards.
@@ -119,8 +117,7 @@ impl UseMarkable for syn::Ty {
                     self.0.mark_used(ident);
                 }
 
-                // Recurse:
-                visit::walk_path(self, path);
+                visit::visit_path(self, path);
             }
 
             // TODO: Consider BareFnTy and ParenthesizedParameterData wrt.

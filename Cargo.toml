@@ -28,6 +28,7 @@ proptest = { path = "../proptest" }
 
 [dependencies]
 
-syn = { version = "0.11", features = ["full", "visit"] }
+#syn = { version = "0.11", features = ["full", "visit"] }
 
-quote = "0.3.15"
+syn = { version = "0.12.10", features = ["visit", "extra-traits", "full"] }
+quote = "0.4"

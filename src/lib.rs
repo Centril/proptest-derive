@@ -26,6 +26,7 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
 
+#[macro_use]
 extern crate syn;
 #[macro_use]
 extern crate quote;
@@ -43,7 +44,5 @@ mod derive;
 pub fn derive_proptest_arbitrary(input: TokenStream) -> TokenStream {
     // Bootstrap!
     // This function just delegates to impl_proptest_arbitrary.
-    derive::impl_proptest_arbitrary(
-        syn::parse_derive_input(&input.to_string()).unwrap()
-    ).parse().unwrap()
+    derive::impl_proptest_arbitrary(syn::parse(input).unwrap()).into()
 }

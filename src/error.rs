@@ -11,7 +11,6 @@
 #![warn(missing_docs)]
 
 use syn;
-use void::IsUninhabited;
 use attr;
 
 //==============================================================================
@@ -40,12 +39,9 @@ pub const TY_VAR: &'static str = "a type variable";
 // Checkers
 //==============================================================================
 
-/// Ensures that the fields of the given struct has fields which are all
-/// inhabited. If one field is uninhabited, the entire product type is
-/// uninhabited.
-pub fn if_uninhabited_fields(vd: &Vec<syn::Field>) {
-    // Not a complete or exhaustive check.
-    if vd.as_slice().is_uninhabited() { uninhabited_struct() }
+/// Ensures that the type is not parametric over lifetimes.
+pub fn if_has_lifetimes(ast: &syn::DeriveInput) {
+    if ast.generics.lifetimes().count() > 0 { has_lifetimes() }
 }
 
 /// Ensures that no attributes were specified on `item`.
@@ -107,11 +103,6 @@ pub fn if_weight_present(attrs: &attr::ParsedAttributes, item: &str) {
     if attrs.weight.is_some() { illegal_weight(item) }
 }
 
-/// Ensures that the type is not parametric over lifetimes.
-pub fn if_has_lifetimes(ast: &syn::DeriveInput) {
-    if !ast.generics.lifetimes.is_empty() { has_lifetimes() }
-}
-
 //==============================================================================
 // Messages
 //==============================================================================
@@ -141,7 +132,7 @@ macro_rules! error {
 pub fn has_lifetimes() -> ! {
     error!(E0001,
         "Deriving on types that are parametric over lifetimes, such as: \
-        `struct Foo<'a> { bar: &'a str }` are currently not supported since \
+        `struct Foo<'a> { bar: &'a str }` is currently not supported since \
         proptest can not define strategies for such types.");
 }
 
@@ -241,7 +232,7 @@ pub fn parent_has_param(item: &str) -> ! {
 /// Happens when `#[proptest(params = <type>)]` is set on `item`
 /// but not `#[proptest(strategy = <type>)]`.
 /// This does not apply to the top level type declaration.
-pub fn cant_set_param_but_not_strat(self_ty: &syn::Ty, item: &str) -> ! {
+pub fn cant_set_param_but_not_strat(self_ty: &syn::Type, item: &str) -> ! {
     error!(E0011,
         "Can not set `#[proptest(params = <type>)]` on {0} while not \
          providing a strategy for the {0} to use it since \
@@ -297,7 +288,7 @@ pub fn immediate_literals() -> ! {
 
 /// Happens when `<modifier>` in `#[proptest(<modifier>)]` is set more than
 /// once.
-pub fn set_again(meta: &syn::MetaItem) -> ! {
+pub fn set_again(meta: &syn::Meta) -> ! {
     error!(E0017,
         "The attribute modifier `{}` inside `#[proptest(..)]` has already been \
          set. To fix the error, please remove at least one such modifier."
@@ -339,13 +330,13 @@ pub fn skip_malformed() -> ! {
 }
 
 /// Happens when `#[proptest(weight..)]` is malformed.
-pub fn weight_malformed(attr_name: &str) -> ! {
+pub fn weight_malformed(meta: &syn::Meta) -> ! {
     error!(E0021,
         "The attribute modifier `{0}` inside `#[proptest(..)]` must have the \
          format `#[proptest({0} = <integer>)]` where `<integer>` is an integer \
          that fits within a `u32`. An example: `#[proptest({0} = 2)]` to set \
          a relative weight of 2."
-        , attr_name);
+        , meta.name().as_ref());
 }
 
 /// Happens when both `#[proptest(params = "<type>")]` and
@@ -388,22 +379,22 @@ pub fn overspecified_strat() -> ! {
 
 /// Happens when `#[proptest(strategy..)]` or `#[proptest(value..)]` is
 /// malformed.
-pub fn strategy_malformed(item: &str) -> ! {
+pub fn strategy_malformed(meta: &syn::Meta) -> ! {
     error!(E0026,
         "The attribute modifier `{0}` inside `#[proptest(..)]` must have the \
          format `#[proptest({0} = \"<expr>\")]` where `<expr>` is a \
          valid Rust expression."
-        , item);
+        , meta.name().as_ref());
 }
 
 /// This happens when `<expr>` inside `#[proptest(strategy = "<expr>")]`
 /// or `#[proptest(value = "<expr>")]` is malformed. In other words, `<expr>`
 /// is not a valid Rust expression.
-pub fn strategy_malformed_expr(item: &str) -> ! {
+pub fn strategy_malformed_expr(meta: &syn::Meta) -> ! {
     error!(E0027,
         "The attribute modifier `{}` inside `#[proptest(..)]` is not assigned \
          a valid Rust expression."
-        , item);
+        , meta.name().as_ref());
 }
 
 /// Any attributes on a skipped variant has no effect - so we emit this error

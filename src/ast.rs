@@ -17,7 +17,6 @@ use util::*;
 use use_tracking::*;
 
 use std::ops::{Add, AddAssign};
-use std::mem;
 
 //==============================================================================
 // Config
@@ -73,15 +72,13 @@ impl Impl {
         let Impl { typ, mut tracker, parts: (params, strategy, ctor) } = self;
 
         /// A `Debug` bound on a type variable.
-        fn debug_bound() -> syn::TyParamBound {
-            make_path_bound(global_path(
-                idents_to_path(&["std", "fmt", "Debug"])))
+        fn debug_bound() -> syn::TypeParamBound {
+            parse_quote!( ::std::fmt::Debug )
         }
 
         /// An `Arbitrary` bound on a type variable.
-        fn arbitrary_bound() -> syn::TyParamBound {
-            make_path_bound(global_path(
-                idents_to_path(&["proptest", "arbitrary", "Arbitrary"])))
+        fn arbitrary_bound() -> syn::TypeParamBound {
+            parse_quote!( ::proptest::arbitrary::Arbitrary )
         }
 
         // Add bounds and get generics for the impl.
@@ -119,13 +116,13 @@ impl Impl {
 pub type StratPair = (Strategy, Ctor);
 
 /// The type and constructor for `any::<Type>()`.
-pub fn pair_any(ty: syn::Ty) -> StratPair {
+pub fn pair_any(ty: syn::Type) -> StratPair {
     let q = Ctor::Arbitrary(ty.clone(), None);
     (Strategy::Arbitrary(ty), q)
 }
 
 /// The type and constructor for `any_with::<Type>(parameters)`.
-pub fn pair_any_with(ty: syn::Ty, var: usize) -> StratPair {
+pub fn pair_any_with(ty: syn::Type, var: usize) -> StratPair {
     let q = Ctor::Arbitrary(ty.clone(), Some(var));
     (Strategy::Arbitrary(ty), q)
 }
@@ -137,14 +134,14 @@ pub fn pair_any_with(ty: syn::Ty, var: usize) -> StratPair {
 /// This is a temporary restriction. Once `impl Trait` is
 /// stabilized, the boxing and dynamic dispatch can be replaced
 /// with a statically dispatched anonymous type instead.
-pub fn pair_existential(ty: syn::Ty, strat: syn::Expr) -> StratPair {
+pub fn pair_existential(ty: syn::Type, strat: syn::Expr) -> StratPair {
     (Strategy::Existential(ty), Ctor::Existential(strat))
 }
 
 /// The type and constructor for a strategy that always returns
 /// the value provided in the expression `val`.
 /// This is statically dispatched since no erasure is needed or used.
-pub fn pair_value(ty: syn::Ty, val: syn::Expr) -> StratPair {
+pub fn pair_value(ty: syn::Type, val: syn::Expr) -> StratPair {
     (Strategy::Value(ty), Ctor::Value(val))
 }
 
@@ -159,11 +156,8 @@ pub fn pair_value_self(val: syn::Expr) -> StratPair {
 }
 
 /// Same as `pair_value` but for a unit variant or unit struct.
-pub fn pair_unit_self(path: VariantPath) -> StratPair {
-    pair_value_self(syn::Expr {
-        attrs: vec![],
-        node: syn::ExprKind::Struct(path.into(), vec![], None),
-    })
+pub fn pair_unit_self(path: syn::Path) -> StratPair {
+    pair_value_self(parse_quote!( #path {} ))
 }
 
 /// The type and constructor for .prop_map:ing a set of strategies
@@ -189,98 +183,53 @@ pub fn pair_oneof((strats, ctors): (Vec<Strategy>, Vec<(u32, Ctor)>))
 //==============================================================================
 
 /// Represents the associated item of `Parameters` of an `Arbitrary` impl.
-pub enum Params {
-    /// A parameter made up of a single type logically.
-    /// This mostly happens when dealing with a user specified type or
-    /// for a simple type.
-    ///
-    /// We represent a singleton in this way to avoid heap allocation
-    /// in the case of a single type which is common.
-    Single(syn::Ty),
-    /// Zero or Two+ parameters.
-    Many(Vec<syn::Ty>)
-}
+pub struct Params(Vec<syn::Type>);
 
 impl Params {
     /// Construct an `empty` list of parameters.
     /// This is equivalent to the unit type `()`.
     pub fn empty() -> Self {
-        Params::Many(Vec::new())
+        Params(Vec::new())
     }
 
     /// Computes and returns the number of parameter types.
     pub fn len(&self) -> usize {
-        match *self {
-            Params::Single(_) => 1,
-            Params::Many(ref tys) => tys.len()
-        }
+        self.0.len()
     }
 }
 
-impl From<Params> for syn::Ty {
+impl From<Params> for syn::Type {
     fn from(x: Params) -> Self {
-        match x {
-            Params::Single(ty) => ty,
-            Params::Many(tys) => syn::Ty::Tup(tys)
-        }
+        let tys = x.0;
+        parse_quote!( (#(#tys),*) )
     }
 }
 
-impl Add<syn::Ty> for Params {
+impl Add<syn::Type> for Params {
     type Output = Params;
 
-    fn add(self, rhs: syn::Ty) -> Self::Output {
-        /*
-        if is_unit_type(&rhs) {
-            // We've been given a unit type - for ergonomics,
-            // we skip the type so as to not force the user to
-            // specify a tuple of units just to please the compiler.
-            self
-        } else {
-        */
-            // Logic is straight forward here.. We just add one type.
-            match self {
-                Params::Single(typ) => Params::Many(vec![typ, rhs]),
-                Params::Many(mut types) => if types.is_empty() {
-                    Params::Single(rhs)
-                } else {
-                    types.push(rhs);
-                    Params::Many(types)
-                }
-            }
-        //}
+    fn add(mut self, rhs: syn::Type) -> Self::Output {
+        self.0.push(rhs);
+        self
     }
 }
 
-impl AddAssign<syn::Ty> for Params {
-    fn add_assign(&mut self, rhs: syn::Ty) {
-        // We have to do a swap first.
-        *self = mem::replace(self, Params::empty()) + rhs;
+impl AddAssign<syn::Type> for Params {
+    fn add_assign(&mut self, rhs: syn::Type) {
+        self.0.push(rhs);
     }
 }
 
 impl ToTokens for Params {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        match *self {
-            Params::Single(ref typ) => typ.to_tokens(tokens),
-            Params::Many(ref types) => tuple_to_tokens(tokens, types),
-        }
+        Tuple2(self.0.as_slice()).to_tokens(tokens)
     }
 }
 
 /// Returns for a given type `ty` the associated item `Parameters` of the
 /// type's `Arbitrary` implementation.
-pub fn arbitrary_param(ty: syn::Ty) -> syn::Ty {
-    /// Returns for a given type `ty` the associated `item` of the
-    /// type's `Arbitrary` implementation.
-    fn arbitrary_item(ty: syn::Ty, item: &str) -> syn::Ty {
-        let segs = idents_to_path(&["proptest", "arbitrary", "Arbitrary",
-                        item.into()]);
-        let qself = syn::QSelf { position: segs.len() - 1, ty: ty.into(), };
-        syn::Ty::Path(Some(qself), global_path(segs))
-    }
-
-    arbitrary_item(ty, "Parameters")
+pub fn arbitrary_param(ty: syn::Type) -> syn::Type {
+    parse_quote!(<#ty as ::proptest::arbitrary::Arbitrary>::Parameters)
 }
 
 //==============================================================================
@@ -291,7 +240,7 @@ pub fn arbitrary_param(ty: syn::Ty) -> syn::Ty {
 pub enum Strategy {
     /// Assuming the metavariable `$ty` for a given type, this models
     /// the strategy type `<$ty as Arbitrary>::Strategy`.
-    Arbitrary(syn::Ty),
+    Arbitrary(syn::Type),
     /// Assuming the metavariable `$ty` for a given type, this models
     /// the strategy type `BoxedStrategy<$ty>`, i.e: an existentially
     /// typed strategy.
@@ -299,11 +248,11 @@ pub enum Strategy {
     /// The dynamic dispatch used here is an implementation
     /// detail that may be changed. Such a change does not count as
     /// a breakage semver wise.
-    Existential(syn::Ty),
+    Existential(syn::Type),
     /// Assuming the metavariable `$ty` for a given type, this models
     /// a non-shrinking strategy that simply always returns a value
     /// of the given type.
-    Value(syn::Ty),
+    Value(syn::Type),
     /// Assuming a sequence of strategies, this models a mapping from
     /// that sequence to `Self`.
     Map(Box<[Strategy]>),
@@ -314,33 +263,33 @@ pub enum Strategy {
     Union(Box<[Strategy]>),
 }
 
+macro_rules! quote_append {
+    ($tokens: expr, $($quasi: tt)*) => {
+        $tokens.append_all(quote!($($quasi)*))
+    };
+}
+
 impl ToTokens for Strategy {
     fn to_tokens(&self, tokens: &mut Tokens) {
         // The logic of each of these are pretty straight forward
         // save for union which is described separately.
         use self::Strategy::*;
         match *self {
-            Arbitrary(ref ty) => {
-                tokens.append("<");
-                ty.to_tokens(tokens);
-                tokens.append(" as ::proptest::arbitrary::Arbitrary>::Strategy");
-            },
-            Existential(ref ty) => {
-                tokens.append("::proptest::strategy::BoxedStrategy<");
-                ty.to_tokens(tokens);
-                tokens.append(">");
-            },
-            Value(ref ty) => {
-                tokens.append("::proptest::strategy::LazyJustFn<");
-                ty.to_tokens(tokens);
-                tokens.append(">");
-            },
+            Arbitrary(ref ty) => quote_append!(tokens,
+                <#ty as ::proptest::arbitrary::Arbitrary>::Strategy>
+            ),
+            Existential(ref ty) => quote_append!(tokens,
+                ::proptest::strategy::BoxedStrategy<#ty>
+            ),
+            Value(ref ty) => quote_append!(tokens,
+                ::proptest::strategy::LazyJustFn<#ty>
+            ),
             Map(ref strats) => {
-                tokens.append("::proptest::strategy::Map<");
-                tuple_to_tokens2(tokens, &strats);
-                tokens.append(", fn(::proptest::strategy::ValueFor<");
-                tuple_to_tokens2(tokens, &strats);
-                tokens.append(">) -> Self>");
+                let tuple = Tuple(strats.iter());
+                quote_append!(tokens,
+                    ::proptest::strategy::Map<#tuple,
+                        fn(::proptest::strategy::ValueFor<#tuple>) -> Self>
+                )
             },
             Union(ref strats) => union_strat_to_tokens(tokens, strats),
         }
@@ -380,7 +329,7 @@ pub enum Ctor {
     /// for the given `Ty´. If `Some(idx)` is specified, then
     /// a parameter at `params_<idx>` is used and provided
     /// to `any_with::<Ty>(params_<idx>)`.
-    Arbitrary(syn::Ty, Option<usize>),
+    Arbitrary(syn::Type, Option<usize>),
     /// An exact strategy value given by the expression.
     Existential(syn::Expr),
     /// A strategy that always produces the given expression.
@@ -414,7 +363,7 @@ pub fn extract_api(c: Ctor, from: FromReg) -> Ctor {
 impl ToTokens for FromReg {
     fn to_tokens(&self, tokens: &mut Tokens) {
         match *self {
-            FromReg::Top => tokens.append(TOP_PARAM_NAME),
+            FromReg::Top => syn::Ident::from(TOP_PARAM_NAME).to_tokens(tokens),
             FromReg::Num(reg) => param(reg).to_tokens(tokens),
         }
     }
@@ -424,8 +373,8 @@ impl ToTokens for ToReg {
     fn to_tokens(&self, tokens: &mut Tokens) {
         match *self {
             ToReg::Range(to) if to == 1 => param(0).to_tokens(tokens),
-            ToReg::Range(to) => tuple_to_tokens(tokens, (0..to).map(param)),
-            ToReg::API => tokens.append(API_PARAM_NAME),
+            ToReg::Range(to) => Tuple((0..to).map(param)).to_tokens(tokens),
+            ToReg::API => syn::Ident::from(API_PARAM_NAME).to_tokens(tokens),
         }
     }
 }
@@ -436,42 +385,26 @@ impl ToTokens for Ctor {
         // save for union which is described separately.
         use self::Ctor::*;
         match *self {
-            Extract(ref ctor, ref to, ref from) => {
-                tokens.append("{ let");
-                to.to_tokens(tokens);
-                tokens.append("=");
-                from.to_tokens(tokens);
-                tokens.append(";");
-                ctor.to_tokens(tokens);
-                tokens.append("}");
-            },
-            Arbitrary(ref ty, fv) => if let Some(fv) = fv {                    
-                tokens.append("::proptest::arbitrary::any_with::<");
-                ty.to_tokens(tokens);
-                tokens.append(">(");
-                param(fv).to_tokens(tokens);
-                tokens.append(")");
+            Extract(ref ctor, ref to, ref from) => quote_append!(tokens, {
+                let #to = #from; #ctor
+            }),
+            Arbitrary(ref ty, fv) => if let Some(fv) = fv {
+                let args = param(fv);
+                quote_append!(tokens,
+                    ::proptest::arbitrary::any_with::<#ty>(#args)
+                )
             } else {
-                tokens.append("::proptest::arbitrary::any::<");
-                ty.to_tokens(tokens);
-                tokens.append(">()");
+                quote_append!(tokens, ::proptest::arbitrary::any::<#ty>() )
             },
-            Existential(ref expr) => {
-                tokens.append("::proptest::strategy::Strategy::boxed(");
-                expr.to_tokens(tokens);
-                tokens.append(")");
-            },
-            Value(ref expr) => {
-                tokens.append("::proptest::strategy::LazyJustFn::new(||");
-                expr.to_tokens(tokens);
-                tokens.append(")");
-            },
+            Existential(ref expr) => quote_append!(tokens,
+                ::proptest::strategy::Strategy::boxed( #expr ) ),
+            Value(ref expr) => quote_append!(tokens,
+                ::proptest::strategy::LazyJustFn::new(|| #expr ) ),
             Map(ref ctors, ref closure) => {
-                tokens.append("::proptest::strategy::Strategy::prop_map(");
-                tuple_to_tokens2(tokens, &ctors);
-                tokens.append(",");
-                closure.to_tokens(tokens);
-                tokens.append(")");
+                let ctors = Tuple2(ctors.as_ref());
+                quote_append!(tokens,
+                    ::proptest::strategy::Strategy::prop_map(#ctors, #closure)
+                );
             },
             Union(ref ctors) => union_ctor_to_tokens(tokens, ctors),
         }
@@ -518,106 +451,92 @@ impl ToTokens for Ctor {
 ///         (19, ..)))
 /// ```
 fn union_ctor_to_tokens(tokens: &mut Tokens, ctors: &[(u32, Ctor)]) {
-    // Runtime complexity [T(n) ~= 2n ] \in O(n)
-    // Space complexity: constant (or linear if we count the space for ctors)
+    if ctors.is_empty() { return; }
 
-    if let Some(&(_, ref ctor)) = match_singleton(&ctors) {
+    if let Some(&(_, ref ctor)) = match_singleton(ctors) {
         // This is not a union at all - user provided an enum with one variant.
         ctor.to_tokens(tokens);
         return;
     }
 
-    // Compute total weight:
-    let mut right_weight: u32 = ctors.iter().map(|&(w, _)| w).sum();
+    let mut chunks = ctors.chunks(UNION_CHUNK_SIZE);
+    let chunk = chunks.next().unwrap();
+    let head = chunk.iter().map(|&(w, ref c)| quote!( (#w, #c) ));
+    let tail = Recurse(weight_sum(ctors) - weight_sum(chunk), chunks);
 
-    // Keep track of how many left parens we've added:
-    let mut left = 0;
+    quote_append!(tokens,
+        ::proptest::strategy::TupleUnion::new(( #(#head,)* #tail ))
+    );
 
-    for chunk in ctors.chunks(UNION_CHUNK_SIZE) {
-        if let Some(w_ctor) = match_singleton(&chunk) {
-            // Only one element left - no need to nest.
-            w_ctor.to_tokens(tokens);
-            right_weight -= w_ctor.0;
-        } else {
-            if left > 0 {
-                left += 1;
-                tokens.append("(");
-                right_weight.to_tokens(tokens);
-                tokens.append(",");
-            }
+    struct Recurse<'a>(u32, ::std::slice::Chunks<'a, (u32, Ctor)>);
 
-            // Nest and note that we added 2 left parens.
-            left += 2;
-            tokens.append("::proptest::strategy::TupleUnion::new( (");
+    impl<'a> ToTokens for Recurse<'a> {
+        fn to_tokens(&self, tokens: &mut Tokens) {
+            let (tweight, mut chunks) = (self.0, self.1.clone());
 
-            // Lay out the chunk linearly.
-            for w_ctor in chunk {
-                // Remove our weight from the total sum.
-                right_weight -= w_ctor.0;
-
-                // Dump one strategy:
-                w_ctor.to_tokens(tokens);
-                tokens.append(",");
+            if let Some(chunk) = chunks.next() {
+                if let Some(&(w, ref c)) = match_singleton(chunk) {
+                    // Only one element left - no need to nest.
+                    quote_append!(tokens, (#w, #c) );
+                } else {
+                    let head = chunk.iter().map(|&(w, ref c)| quote!( (#w, #c) ));
+                    let tail = Recurse(tweight - weight_sum(chunk), chunks);
+                    quote_append!(tokens,
+                        (#tweight, ::proptest::strategy::TupleUnion::new((
+                            #(#head,)* #tail
+                        )))
+                    );
+                }
             }
         }
     }
 
-    // Balance out left parens.
-    for _ in 0..left {
-        tokens.append(")");
+    fn weight_sum(ctors: &[(u32, Ctor)]) -> u32 {
+        ctors.iter().map(|&(w, _)| w).sum()
     }
-
-    assert_eq!(right_weight, 0, "INTERNAL LOGIC ERROR");
 }
 
 /// Tokenizes a weighted list of `Strategy`.
 /// For details, see `union_ctor_to_tokens`.
 fn union_strat_to_tokens(tokens: &mut Tokens, strats: &[Strategy]) {
-    if let Some(strat) = match_singleton(&strats) {
+    if strats.is_empty() { return; }
+
+    if let Some(strat) = match_singleton(strats) {
         // This is not a union at all - user provided an enum with one variant.
         strat.to_tokens(tokens);
         return;
     }
 
-    struct WStrategy<'a>(&'a Strategy);
+    let mut chunks = strats.chunks(UNION_CHUNK_SIZE);
+    let chunk = chunks.next().unwrap();
+    let head = chunk.iter().map(|s| quote!( (u32, #s) ));
+    let tail = Recurse(chunks);
 
-    impl<'a> ToTokens for WStrategy<'a> {
+    quote_append!(tokens,
+        ::proptest::strategy::TupleUnion<( #(#head,)* #tail )>
+    );
+
+    struct Recurse<'a>(::std::slice::Chunks<'a, Strategy>);
+
+    impl<'a> ToTokens for Recurse<'a> {
         fn to_tokens(&self, tokens: &mut Tokens) {
-            tokens.append("( u32, ");
-            self.0.to_tokens(tokens);
-            tokens.append(")");
-            tokens.append(",");
-        }
-    }
+            let mut chunks = self.0.clone();
 
-    // Keep track of brackets:
-    let mut left = 0;
-
-    for chunk in strats.chunks(UNION_CHUNK_SIZE) {
-        if let Some(strat) = match_singleton(&chunk) {
-            // Only one element left - no need to nest.
-            WStrategy(strat).to_tokens(tokens);
-        } else {
-            if left > 0 {
-                left += 1;
-                tokens.append("( u32, ");
-            }
-
-            // Nest and note that we added 2 left parens.
-            left += 2;
-            tokens.append("::proptest::strategy::TupleUnion<(");
-
-            // Lay out the chunk linearly.
-            for strat in chunk {
-                // Dump one strategy:
-                WStrategy(strat).to_tokens(tokens);
+            if let Some(chunk) = chunks.next() {
+                if let Some(ref s) = match_singleton(chunk) {
+                    // Only one element left - no need to nest.
+                    quote_append!(tokens, (u32, #s) );
+                } else {
+                    let head = chunk.iter().map(|s| quote!( (u32, #s) ));
+                    let tail = Recurse(chunks);
+                    quote_append!(tokens,
+                        (u32, ::proptest::strategy::TupleUnion<(
+                            #(#head,)* #tail
+                        )>)
+                    );
+                }
             }
         }
-    }
-
-    // Balance out brackets.
-    for x in 0..left {
-        tokens.append(if x % 3 == 1 { ">" } else { ")" });
     }
 }
 
@@ -638,8 +557,8 @@ fn param<'a>(fv: usize) -> FreshVar<'a> {
 // MapClosure
 //==============================================================================
 
-/// Constructs a `MapClosure` for the given `VariantPath` and a list of fields.
-pub fn map_closure(path: VariantPath, fs: &Vec<syn::Field>) -> MapClosure {
+/// Constructs a `MapClosure` for the given `path` and a list of fields.
+pub fn map_closure(path: syn::Path, fs: &Vec<syn::Field>) -> MapClosure {
     let ids = fs.iter().filter_map(|field| field.ident.as_ref())
                 .cloned().collect::<Vec<_>>();
 
@@ -652,8 +571,8 @@ pub fn map_closure(path: VariantPath, fs: &Vec<syn::Field>) -> MapClosure {
 
 /// A `MapClosure` models the closure part inside a `.prop_map(..)` call.
 pub enum MapClosure {
-    Tuple(VariantPath, usize),
-    Named(VariantPath, Vec<syn::Ident>),
+    Tuple(syn::Path, usize),
+    Named(syn::Path, Vec<syn::Ident>),
 }
 
 impl ToTokens for MapClosure {
@@ -663,48 +582,42 @@ impl ToTokens for MapClosure {
         }
 
         fn map_closure_base<T, I>
-            (tokens: &mut Tokens, path: &VariantPath, count: usize, iter: I)
+            (tokens: &mut Tokens, path: &syn::Path, count: usize, iter: I)
         where
             T: ToTokens,
             I: Iterator<Item = T>,
-        {    
-            tokens.append("|");
-            if count == 1 {
-                tmp_var(0).to_tokens(tokens);
+        {
+            tokens.append_all(if count == 1 {
+                let tmp = tmp_var(0);
+                quote!(|#tmp|)
             } else {
-                tuple_to_tokens(tokens, (0..count).map(tmp_var));
-            }
-            tokens.append("|");
+                let tmps = (0..count).map(tmp_var);
+                quote!(|(#(#tmps),*)|)
+            });
 
             path.to_tokens(tokens);
-
-            tokens.append("{");
-            tokens.append_terminated(iter, ",");
-            tokens.append("}");
+            syn::token::Brace::default().surround(tokens, |tokens|
+                tokens.append_terminated(iter, <Token![,]>::default())
+            );
         }
 
         struct FieldInit<T: ToTokens>((usize, T));
-        struct FieldIndex(pub usize);
 
         impl<T: ToTokens> ToTokens for FieldInit<T> {
             fn to_tokens(&self, tokens: &mut Tokens) {
                 let (count, ref name) = self.0;
                 name.to_tokens(tokens);
-                tokens.append(":");
+                <Token![:]>::default().to_tokens(tokens);
                 tmp_var(count).to_tokens(tokens);
-            }
-        }
-
-        impl<'a> ToTokens for FieldIndex {
-            fn to_tokens(&self, tokens: &mut Tokens) {
-                tokens.append(format!("{}", self.0))
             }
         }
 
         match *self {
             MapClosure::Tuple(ref path, ref count) =>
                 map_closure_base(tokens, path, *count,
-                    (0..*count).map(|idx| FieldInit((idx, FieldIndex(idx))))),
+                    (0..*count).map(|idx| FieldInit((idx,
+                        syn::Member::Unnamed(syn::Index::from(idx))
+                    )))),
             MapClosure::Named(ref path, ref ids) =>
                 map_closure_base(tokens, path, ids.len(),
                     ids.iter().enumerate().map(FieldInit)),
@@ -712,6 +625,7 @@ impl ToTokens for MapClosure {
     }
 }
 
+/*
 //==============================================================================
 // VariantPath
 //==============================================================================
@@ -725,13 +639,11 @@ pub struct VariantPath {
 
 impl From<VariantPath> for syn::Path {
     fn from(path: VariantPath) -> Self {
-        syn::Path {
-            global: false,
-            segments: if let Some(variant) = path.var {
-                vec![path.typ.into(), variant.into()]
-            } else {
-                vec![path.typ.into()]
-            },
+        let VariantPath { typ, var } = path;
+        if let Some(variant) = var {
+            parse_quote!(#typ::#variant)
+        } else {
+            typ.into()
         }
     }
 }
@@ -750,13 +662,11 @@ impl<'a> From<(&'a syn::Ident, syn::Ident)> for VariantPath {
 
 impl ToTokens for VariantPath {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        self.typ.to_tokens(tokens);
-        if let Some(ref var) = self.var {
-            tokens.append("::");
-            var.to_tokens(tokens);
-        }
+        let p: syn::Path = self.clone().into();
+        p.to_tokens(tokens);
     }
 }
+*/
 
 //==============================================================================
 // FreshVar
@@ -777,7 +687,8 @@ fn fresh_var(prefix: &str, count: usize) -> FreshVar {
 
 impl<'a> ToTokens for FreshVar<'a> {
     fn to_tokens(&self, tokens: &mut Tokens) {
-        tokens.append(format!("{}_{}", self.prefix, self.count))
+        let ident = format!("{}_{}", self.prefix, self.count);
+        syn::Ident::from(ident).to_tokens(tokens)
     }
 }
 
@@ -785,27 +696,27 @@ impl<'a> ToTokens for FreshVar<'a> {
 // Util
 //==============================================================================
 
-/// Append a comma separated tuple to a token stream.
-fn tuple_to_tokens2<T>(tokens: &mut Tokens, tuple: &[T])
-where
-    T: ToTokens,
-{
-    if tuple.len() == 1 {
-        tuple[0].to_tokens(tokens);
-    } else {
-        tokens.append("(");
-        tokens.append_separated(tuple, ",");
-        tokens.append(")");
+/// A comma separated tuple to a token stream when more than 1, or just flat
+/// when 1.
+#[derive(Copy, Clone)]
+struct Tuple2<S>(S);
+
+impl<'a, T: ToTokens> ToTokens for Tuple2<&'a [T]> {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        if let Some(ref x) = match_singleton(self.0) {
+            x.to_tokens(tokens);
+        } else {
+            Tuple(self.0).to_tokens(tokens);
+        }
     }
 }
 
 /// Append a comma separated tuple to a token stream.
-fn tuple_to_tokens<T, I>(tokens: &mut Tokens, tuple: I)
-where
-    T: ToTokens,
-    I: IntoIterator<Item = T>,
-{
-    tokens.append("(");
-    tokens.append_separated(tuple, ",");
-    tokens.append(")");
+struct Tuple<I>(I);
+
+impl<T: ToTokens, I: Clone + IntoIterator<Item = T>> ToTokens for Tuple<I> {
+    fn to_tokens(&self, tokens: &mut Tokens) {
+        syn::token::Paren::default().surround(tokens, |tokens|
+            tokens.append_separated(self.0.clone(), <Token![,]>::default()))
+    }
 }

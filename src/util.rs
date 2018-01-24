@@ -8,11 +8,13 @@
 
 //! Mostly useful utilities for syn used in the crate.
 
+use std::borrow::Borrow;
+
 use syn;
+use syn::punctuated::Punctuated;
+use syn::PathSegment;
 
 use use_tracking;
-
-use std::borrow::Borrow;
 
 //==============================================================================
 // General AST manipulation and types
@@ -27,45 +29,75 @@ pub struct DeriveInput<B> {
     pub body: B
 }
 
-/// Extract the list of fields from a `VariantData` from syn.
+/// Extract the list of fields from a `Fields` from syn.
 /// We don't care about the style, we always and uniformly use {} in
 /// struct literal syntax for making struct and enum variant values.
-pub fn variant_data_to_fields(vd: syn::VariantData) -> Vec<syn::Field> {
-    use syn::VariantData::*;
-    match vd {
-        Struct(fs) => fs,
-        Tuple(fs)  => fs,
+pub fn fields_to_vec(fields: syn::Fields) -> Vec<syn::Field> {
+    use syn::Fields::*;
+    match fields {
+        Named(fields) => fields.named.into_iter().collect(),
+        Unnamed(fields) => fields.unnamed.into_iter().collect(),
         Unit       => vec![]
     }
 }
 
-/// Returns true iff the given attribute is an outer one, i.e: `#[<attr>]`.
-/// An inner attribute is the other possibility and has the syntax `#![<attr>]`.
-/// Note that `<attr>` is a meta-variable for the contents inside.
-pub fn is_outer_attr(attr: &syn::Attribute) -> bool {
-    attr.style == syn::AttrStyle::Outer
+/// Returns true iff the given type is the literal unit type `()`.
+/// This is treated the same way by `syn` as a 0-tuple.
+pub fn is_unit_type<T: Borrow<syn::Type>>(ty: T) -> bool {
+    ty.borrow() == &parse_quote!(())
 }
 
-/// Constructs a list of `syn::PathSegment` given a list of
-/// identifiers as string slices. Useful for quickly making
-/// a `syn::Path` out of a specific known path.
-pub fn idents_to_path(idents: &[&str]) -> Vec<syn::PathSegment> {
-    idents.iter().map(|&id| id.into()).collect()
+/// Returns the `Self` type (in the literal syntactic sense).
+pub fn self_ty() -> syn::Type {
+    parse_quote!(Self)
 }
 
-/// Returns a global (prefixed by `::`) path from the given path segments.
-pub fn global_path(segments: Vec<syn::PathSegment>) -> syn::Path {
-    syn::Path { global: true, segments }
+//==============================================================================
+// Paths:
+//==============================================================================
+
+type CommaPS = Punctuated<PathSegment, Token![::]>;
+
+/// Returns true iff the path is simple, i.e:
+/// just a :: separated list of identifiers.
+fn is_path_simple(path: &syn::Path) -> bool {
+    path.segments.iter().all(|ps| ps.arguments.is_empty())
 }
 
-/// Returns true iff the given path segments matches any of given
-/// path segments specified as string slices.
-pub fn match_pathsegs(segs: &[syn::PathSegment], against: &[&[&str]]) -> bool {
-    against.iter().any(|kups|
-        kups.len() == segs.len() &&
-        segs.iter().zip(kups.iter())
-            .all(|(x, y)| x.parameters.is_empty() && x.ident == y)
-    )
+/// Returns true iff lhs matches the rhs.
+fn eq_simple_pathseg(lhs: &str, rhs: &CommaPS) -> bool {
+    lhs.split("::").eq(rhs.iter().map(|ps| ps.ident.as_ref()))
+}
+
+/// Returns true iff lhs matches the given simple Path.
+pub fn eq_simple_path(mut lhs: &str, rhs: &syn::Path) -> bool {
+    if !is_path_simple(rhs) { return false }
+
+    if rhs.leading_colon.is_some() {
+        if !lhs.starts_with("::") { return false }
+        lhs = &lhs[2..];
+    }
+
+    eq_simple_pathseg(lhs, &rhs.segments)
+}
+
+/// Returns true iff the given path matches any of given
+/// paths specified as string slices.
+pub fn match_pathsegs(path: &syn::Path, against: &[&str]) -> bool {
+    against.iter().any(|needle| eq_simple_path(needle, path))
+}
+
+/// Returns true iff the given `PathArguments` is one that has one type
+/// applied to it.
+pub fn pseg_has_single_tyvar(pp: &syn::PathSegment) -> bool {
+    use syn::GenericArgument::Type;
+    use syn::PathArguments::AngleBracketed;
+    if let AngleBracketed(ref ab) = pp.arguments {
+        if let Some(&Type(_)) = match_singleton(ab.args.iter()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns true iff the given type is of the form `PhantomData<TY>` where
@@ -73,66 +105,47 @@ pub fn match_pathsegs(segs: &[syn::PathSegment], against: &[&[&str]]) -> bool {
 pub fn is_phantom_data(path: &syn::Path) -> bool {
     let segs = &path.segments;
     if segs.is_empty() { return false }
-    let last = segs.len() - 1;
-    let lseg = &segs[last];
+
+    let mut path = path.clone();
+    let lseg = path.segments.pop().unwrap().into_value();
 
     &lseg.ident == "PhantomData" &&
-    pp_has_single_tyvar(&lseg.parameters) &&
-    match_pathsegs(&segs[..last], &[
+    pseg_has_single_tyvar(&lseg) &&
+    match_pathsegs(&path, &[
         // We hedge a bet that user will never declare
         // their own type named PhantomData.
         // This may give errors, but is worth it usability-wise.
-        &[],
-        &["marker"],
-        &["std", "marker"],
-        &["core", "marker"]
+        "",
+        "marker",
+        "std::marker",
+        "core::marker",
+        "::std::marker",
+        "::core::marker",
     ])
 }
 
 /// Extracts a simple non-global path of length 1.
 pub fn extract_simple_path<'a>(path: &'a syn::Path) -> Option<&'a syn::Ident> {
-    match_singleton(&path.segments).and_then(|f|
-        if !path.global { Some(&f.ident) } else { None })
-}
-
-/// Returns true iff the given `PathParameters` is one that has one type
-/// applied to it.
-pub fn pp_has_single_tyvar(pp: &syn::PathParameters) -> bool {
-    if let syn::PathParameters::AngleBracketed(ref x) = *pp {
-        x.lifetimes.is_empty() && x.bindings.is_empty() && x.types.len() == 1
-    } else {
-        false
-    }
-}
-
-/// Constructs a bound like `::std::fmt::Debug` that can be used as:
-/// `T: ::std::fmt::Debug`.
-pub fn make_path_bound(path: syn::Path) -> syn::TyParamBound {
-    let ptr = syn::PolyTraitRef { trait_ref: path, bound_lifetimes: vec![] };
-    syn::TyParamBound::Trait(ptr, syn::TraitBoundModifier::None)
-}
-
-/// Returns the `Self` type (in the literal syntactic sense).
-pub fn self_ty() -> syn::Ty {
-    syn::Ty::Path(None, "Self".into())
-}
-
-/// Returns true iff the given type is the literal unit type `()`.
-/// This is treated the same way by `syn` as a 0-tuple.
-pub fn is_unit_type<T: Borrow<syn::Ty>>(ty: T) -> bool {
-    if let &syn::Ty::Tup(ref vec) = ty.borrow() {
-        vec.is_empty()
-    } else {
-        false
-    }
+    filter(match_singleton(&path.segments), |_| !path.global())
+        .map(|f| &f.ident)
 }
 
 //==============================================================================
 // General Rust utilities:
 //==============================================================================
 
-/// Returns `Some(x)` iff the slice is singleton and otherwise None.
-pub fn match_singleton<T>(slice: &[T]) -> Option<&T> {
-    let mut it = slice.into_iter();
-    if let (Some(x), None) = (it.next(), it.next()) { Some(x) } else { None }
+/// Returns `Some(x)` iff the iterable is singleton and otherwise None.
+pub fn match_singleton<T, I>(it: I) -> Option<T>
+where
+    I: IntoIterator<Item = T>,
+{
+    let mut it = it.into_iter();
+    filter(it.next(), |_| it.next().is_none())
+}
+
+/// A temporary solution until Option::filter is stabilized.
+/// TODO: replace once stabilized!
+fn filter<T, P: FnOnce(&T) -> bool>
+    (option: Option<T>, predicate: P) -> Option<T> {
+    option.and_then(|x| if predicate(&x) { Some(x) } else { None })
 }

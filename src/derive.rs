@@ -11,7 +11,8 @@
 use syn;
 use quote::Tokens;
 
-use util::{is_unit_type, self_ty, DeriveInput, variant_data_to_fields};
+use util::{is_unit_type, self_ty, DeriveInput, fields_to_vec};//, variant_data_to_fields};
+use void::IsUninhabited;
 use error;
 use attr::{parse_attributes, ParamsMode, ParsedAttributes, StratMode};
 use use_tracking::{UseMarkable, UseTracker};
@@ -25,29 +26,30 @@ use ast::*;
 
 /// Entry point for deriving `Arbitrary`.
 pub fn impl_proptest_arbitrary(ast: syn::DeriveInput) -> Tokens {
+    use syn::Data::*;
+
     // Deny lifetimes on type.
     error::if_has_lifetimes(&ast);
 
     let tracker = UseTracker::new(ast.generics);
 
     // Compile into our own high level IR for the impl:
-    #[allow(unreachable_patterns)]
-    let the_impl = match ast.body {
+    let the_impl = match ast.data {
         // Deal with structs:
-        syn::Body::Struct(vd) => derive_struct(DeriveInput {
+        Struct(data) => derive_struct(DeriveInput {
             tracker,
             ident: ast.ident,
             attrs: ast.attrs,
-            body: variant_data_to_fields(vd),
+            body: fields_to_vec(data.fields),
         }),
         // Deal with enums:
-        syn::Body::Enum(variants) => derive_enum(DeriveInput {
+        Enum(data) => derive_enum(DeriveInput {
             tracker,
             ident: ast.ident,
             attrs: ast.attrs,
-            body: variants
+            body: data.variants.into_iter().collect(),
         }),
-        // Over-specified on purpose to handle unions in the future:
+        // Unions are not supported:
         _ => { error::not_struct_or_enum() }
     };
 
@@ -55,7 +57,7 @@ pub fn impl_proptest_arbitrary(ast: syn::DeriveInput) -> Tokens {
     let q = the_impl.to_tokens();
 
     // TODO: remove! (perhaps keep it behind a feature flag...?):
-    println!("{}\n", q.as_ref());
+    println!("{}\n", q);
 
     // We're done!
     q
@@ -67,8 +69,10 @@ pub fn impl_proptest_arbitrary(ast: syn::DeriveInput) -> Tokens {
 
 /// Entry point for deriving `Arbitrary` for `struct`s.
 fn derive_struct(mut ast: DeriveInput<Vec<syn::Field>>) -> Impl {
-    // Ensure that the type is inhabited:
-    error::if_uninhabited_fields(&ast.body);
+    // Ensures that the fields of the given struct has fields which are all
+    // inhabited. If one field is uninhabited, the entire product type is
+    // uninhabited.
+    if (&*ast.body).is_uninhabited() { error::uninhabited_struct() }
 
     let t_attrs = parse_attributes(ast.attrs);
 
@@ -78,7 +82,7 @@ fn derive_struct(mut ast: DeriveInput<Vec<syn::Field>>) -> Impl {
     // Deny an explicit strategy directly on the struct.
     error::if_strategy_present(&t_attrs, error::STRUCT);
 
-    let v_path = (&ast.ident).into();
+    let v_path = ast.ident.into();
     let parts = if ast.body.is_empty() {
         // Deriving for a unit struct.
         error::if_params_present_on_unit_struct(&t_attrs);
@@ -110,7 +114,7 @@ fn derive_struct(mut ast: DeriveInput<Vec<syn::Field>>) -> Impl {
 /// Determine the `Parameters` part. We've already handled everything else.
 /// After this, we have all parts needed for an impl. If `None` is given,
 /// then the unit type `()` will be used for `Parameters`.
-fn add_top_params(param_ty: Option<syn::Ty>, (strat, ctor): StratPair)
+fn add_top_params(param_ty: Option<syn::Type>, (strat, ctor): StratPair)
     -> ImplParts
 {
     let params = Params::empty();
@@ -148,7 +152,7 @@ fn derive_product_has_params(
 
 /// Determine strategy using "Default" semantics  for a product.
 fn product_handle_default_params
-    (ut: &mut UseTracker, ty: syn::Ty, strategy: StratMode) -> StratPair {
+    (ut: &mut UseTracker, ty: syn::Type, strategy: StratMode) -> StratPair {
     match strategy {
         // Specific strategy - use the given expr and erase the type
         // (since we don't know about it):
@@ -218,7 +222,7 @@ fn derive_product_no_params
 /// Wrap the given constructor with a let binding
 /// moving `param_<x>` into `params`.
 fn extract_nparam<C>
-    (acc: &mut PartsAcc<C>, params_ty: syn::Ty, (strat, ctor): StratPair)
+    (acc: &mut PartsAcc<C>, params_ty: syn::Type, (strat, ctor): StratPair)
     -> StratPair
 {
     (strat, extract_api(ctor, FromReg::Num(acc.add_param(params_ty))))
@@ -238,7 +242,7 @@ fn derive_enum(mut ast: DeriveInput<Vec<syn::Variant>>) -> Impl {
     }
 
     // Bail if all variants are uninhabited:
-    if ast.body.as_slice().is_uninhabited() {
+    if (&*ast.body).is_uninhabited() {
         error::uninhabited_enum_variants_uninhabited();
     }
 
@@ -282,7 +286,7 @@ fn derive_enum_no_params(
 
     // Fold into the accumulator the strategies for each variant:
     let acc = inhabited.fold(acc, |mut acc, (weight, ident, fields, attrs)| {
-        let path = (_self, ident).into();
+        let path = parse_quote!( #_self::#ident );
         let (strat, ctor) = if fields.is_empty() {
             // Unit variant:
             pair_unit_variant(&attrs, path)
@@ -311,7 +315,7 @@ fn ensure_union_has_strategies<C>(strats: &StratAcc<C>) {
 /// Derive for a variant which has fields and where the
 /// variant or its fields may specify `params` or `no_params`.
 fn derive_variant_with_fields<C>
-    (ut: &mut UseTracker, v_path: VariantPath, attrs: ParsedAttributes,
+    (ut: &mut UseTracker, v_path: syn::Path, attrs: ParsedAttributes,
      fields: Vec<syn::Field>, acc: &mut PartsAcc<C>)
     -> StratPair
 {
@@ -375,7 +379,7 @@ fn derive_variant_with_fields<C>
 
 /// Determine strategy using "Default" semantics for a variant.
 fn variant_handle_default_params(
-    ut: &mut UseTracker, v_path: VariantPath, attrs: ParsedAttributes,
+    ut: &mut UseTracker, v_path: syn::Path, attrs: ParsedAttributes,
     fields: Vec<syn::Field>)
     -> StratPair {
     match attrs.strategy {
@@ -409,7 +413,7 @@ fn deny_all_attrs_on_fields(fields: Vec<syn::Field>) {
 /// variant or its fields may NOT specify `params` or `no_params`.
 fn derive_enum_has_params(
     ut: &mut UseTracker, _self: &syn::Ident, variants: Vec<syn::Variant>,
-    sty: Option<syn::Ty>)
+    sty: Option<syn::Type>)
     -> ImplParts
 {
     // Initialize the accumulator:
@@ -422,7 +426,7 @@ fn derive_enum_has_params(
 
     // Fold into the accumulator the strategies for each variant:
     let acc = inhabited.fold(acc, |acc, (weight, ident, fields, attrs)| {
-        let path = (_self, ident).into();
+        let path = parse_quote!( #_self::#ident );
         let (strat, ctor) = if fields.is_empty() {
             // Unit variant:
             pair_unit_variant(&attrs, path)
@@ -445,7 +449,7 @@ fn keep_inhabited_variant(_self: &syn::Ident, variant: syn::Variant)
     use void::IsUninhabited;
 
     let attrs = parse_attributes(variant.attrs);
-    let fields = variant_data_to_fields(variant.data);
+    let fields = fields_to_vec(variant.fields);
 
     if attrs.skip {
         // We've been ordered to skip this variant!
@@ -484,7 +488,7 @@ fn ensure_has_only_skip_attr(attrs: ParsedAttributes, item: &str) {
 
 /// Deal with a unit variant.
 fn pair_unit_variant
-    (attrs: &ParsedAttributes, v_path: VariantPath) -> StratPair {
+    (attrs: &ParsedAttributes, v_path: syn::Path) -> StratPair {
     error::if_strategy_present_on_unit_variant(attrs);
     error::if_params_present_on_unit_variant(attrs);
     pair_unit_self(v_path)
@@ -522,7 +526,7 @@ impl<C> PartsAcc<C> {
 
     /// Adds a parameter type to the accumulator and returns how many types
     /// there were before adding.
-    fn add_param(&mut self, ty: syn::Ty) -> usize {
+    fn add_param(&mut self, ty: syn::Type) -> usize {
         self.params.add(ty)
     }
 }
@@ -566,7 +570,7 @@ impl ParamAcc {
     }
 
     /// Adds a type to the accumulator and returns the type count before adding.
-    fn add(&mut self, ty: syn::Ty) -> usize {
+    fn add(&mut self, ty: syn::Type) -> usize {
         let var = self.types.len();
         self.types += ty;
         var
