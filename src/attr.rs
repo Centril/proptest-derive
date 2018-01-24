@@ -172,7 +172,7 @@ fn init_parse_state() -> PAll { (None, None, None, None, None, None, None) }
 /// Otherwise, the attribute is irrevant to us and we will simply
 /// ignore it in our processing.
 fn is_proptest_attr(attr: &syn::Attribute) -> bool {
-    attr.path == parse_quote!("proptest")
+    util::eq_simple_path("proptest", &attr.path)
 }
 
 /// Extract all individual attributes inside one `#[proptest(..)]`.

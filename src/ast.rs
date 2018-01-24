@@ -78,7 +78,7 @@ impl Impl {
 
         /// An `Arbitrary` bound on a type variable.
         fn arbitrary_bound() -> syn::TypeParamBound {
-            parse_quote!( ::proptest::arbitrary::Arbitrary )
+            parse_quote!( crate_proptest::arbitrary::Arbitrary )
         }
 
         // Add bounds and get generics for the impl.
@@ -89,12 +89,18 @@ impl Impl {
 
         let _top = syn::Ident::from(TOP_PARAM_NAME);
 
+        let _const = const_ident(typ);
+
         // Linearise everything. We're done after this.
         quote! {
-            impl #impl_generics ::proptest::arbitrary::Arbitrary
+            #[allow(non_upper_case_globals)]
+            const #_const: () = {
+            extern crate proptest as crate_proptest;
+
+            impl #impl_generics crate_proptest::arbitrary::Arbitrary
             for #typ #ty_generics #where_clause {
                 type ValueTree =
-                    <Self::Strategy as ::proptest::strategy::Strategy>::Value;
+                    <Self::Strategy as crate_proptest::strategy::Strategy>::Value;
 
                 type Parameters = #params;
 
@@ -104,8 +110,14 @@ impl Impl {
                     #ctor
                 }
             }
+
+            };
         }
     }
+}
+
+fn const_ident(typ: syn::Ident) -> syn::Ident {
+    syn::Ident::from(format!("IMPL_PROPTEST_ARBITRARY_FOR_{}", typ))
 }
 
 //==============================================================================
@@ -229,7 +241,7 @@ impl ToTokens for Params {
 /// Returns for a given type `ty` the associated item `Parameters` of the
 /// type's `Arbitrary` implementation.
 pub fn arbitrary_param(ty: syn::Type) -> syn::Type {
-    parse_quote!(<#ty as ::proptest::arbitrary::Arbitrary>::Parameters)
+    parse_quote!(<#ty as crate_proptest::arbitrary::Arbitrary>::Parameters)
 }
 
 //==============================================================================
@@ -276,19 +288,19 @@ impl ToTokens for Strategy {
         use self::Strategy::*;
         match *self {
             Arbitrary(ref ty) => quote_append!(tokens,
-                <#ty as ::proptest::arbitrary::Arbitrary>::Strategy>
+                <#ty as crate_proptest::arbitrary::Arbitrary>::Strategy>
             ),
             Existential(ref ty) => quote_append!(tokens,
-                ::proptest::strategy::BoxedStrategy<#ty>
+                crate_proptest::strategy::BoxedStrategy<#ty>
             ),
             Value(ref ty) => quote_append!(tokens,
-                ::proptest::strategy::LazyJustFn<#ty>
+                crate_proptest::strategy::LazyJustFn<#ty>
             ),
             Map(ref strats) => {
                 let tuple = Tuple(strats.iter());
                 quote_append!(tokens,
-                    ::proptest::strategy::Map<#tuple,
-                        fn(::proptest::strategy::ValueFor<#tuple>) -> Self>
+                    crate_proptest::strategy::Map<#tuple,
+                        fn(crate_proptest::strategy::ValueFor<#tuple>) -> Self>
                 )
             },
             Union(ref strats) => union_strat_to_tokens(tokens, strats),
@@ -391,19 +403,19 @@ impl ToTokens for Ctor {
             Arbitrary(ref ty, fv) => if let Some(fv) = fv {
                 let args = param(fv);
                 quote_append!(tokens,
-                    ::proptest::arbitrary::any_with::<#ty>(#args)
+                    crate_proptest::arbitrary::any_with::<#ty>(#args)
                 )
             } else {
-                quote_append!(tokens, ::proptest::arbitrary::any::<#ty>() )
+                quote_append!(tokens, crate_proptest::arbitrary::any::<#ty>() )
             },
             Existential(ref expr) => quote_append!(tokens,
-                ::proptest::strategy::Strategy::boxed( #expr ) ),
+                crate_proptest::strategy::Strategy::boxed( #expr ) ),
             Value(ref expr) => quote_append!(tokens,
-                ::proptest::strategy::LazyJustFn::new(|| #expr ) ),
+                crate_proptest::strategy::LazyJustFn::new(|| #expr ) ),
             Map(ref ctors, ref closure) => {
                 let ctors = Tuple2(ctors.as_ref());
                 quote_append!(tokens,
-                    ::proptest::strategy::Strategy::prop_map(#ctors, #closure)
+                    crate_proptest::strategy::Strategy::prop_map(#ctors, #closure)
                 );
             },
             Union(ref ctors) => union_ctor_to_tokens(tokens, ctors),
@@ -465,7 +477,7 @@ fn union_ctor_to_tokens(tokens: &mut Tokens, ctors: &[(u32, Ctor)]) {
     let tail = Recurse(weight_sum(ctors) - weight_sum(chunk), chunks);
 
     quote_append!(tokens,
-        ::proptest::strategy::TupleUnion::new(( #(#head,)* #tail ))
+        crate_proptest::strategy::TupleUnion::new(( #(#head,)* #tail ))
     );
 
     struct Recurse<'a>(u32, ::std::slice::Chunks<'a, (u32, Ctor)>);
@@ -482,7 +494,7 @@ fn union_ctor_to_tokens(tokens: &mut Tokens, ctors: &[(u32, Ctor)]) {
                     let head = chunk.iter().map(|&(w, ref c)| quote!( (#w, #c) ));
                     let tail = Recurse(tweight - weight_sum(chunk), chunks);
                     quote_append!(tokens,
-                        (#tweight, ::proptest::strategy::TupleUnion::new((
+                        (#tweight, crate_proptest::strategy::TupleUnion::new((
                             #(#head,)* #tail
                         )))
                     );
@@ -513,7 +525,7 @@ fn union_strat_to_tokens(tokens: &mut Tokens, strats: &[Strategy]) {
     let tail = Recurse(chunks);
 
     quote_append!(tokens,
-        ::proptest::strategy::TupleUnion<( #(#head,)* #tail )>
+        crate_proptest::strategy::TupleUnion<( #(#head,)* #tail )>
     );
 
     struct Recurse<'a>(::std::slice::Chunks<'a, Strategy>);
@@ -530,7 +542,7 @@ fn union_strat_to_tokens(tokens: &mut Tokens, strats: &[Strategy]) {
                     let head = chunk.iter().map(|s| quote!( (u32, #s) ));
                     let tail = Recurse(chunks);
                     quote_append!(tokens,
-                        (u32, ::proptest::strategy::TupleUnion<(
+                        (u32, crate_proptest::strategy::TupleUnion<(
                             #(#head,)* #tail
                         )>)
                     );

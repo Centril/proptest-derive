@@ -23,6 +23,8 @@
 //! we can remove the `T: Debug` bound on Arbitrary, we can not support arrays
 //! sized over 32.
 
+#![recursion_limit="128"]
+
 extern crate proc_macro;
 use proc_macro::TokenStream;
 
@@ -46,3 +48,5 @@ pub fn derive_proptest_arbitrary(input: TokenStream) -> TokenStream {
     // This function just delegates to impl_proptest_arbitrary.
     derive::impl_proptest_arbitrary(syn::parse(input).unwrap()).into()
 }
+
+#[cfg(test)] mod tests;
